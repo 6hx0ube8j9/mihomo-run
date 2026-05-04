@@ -13,6 +13,7 @@ import (
 )
 
 func main() {
+	// 1. 获取绝对路径并切换工作目录
 	exePath, err := os.Executable()
 	if err != nil {
 		fatalLog("Get Executable Path failed: " + err.Error())
@@ -20,6 +21,7 @@ func main() {
 	workDir := filepath.Dir(exePath)
 	os.Chdir(workDir)
 
+	// 2. 互斥锁逻辑
 	mutexName, _ := windows.UTF16PtrFromString("Local\\MihomoRunMutex_Static")
 	_, err = windows.CreateMutex(nil, false, mutexName)
 	if err != nil {
@@ -29,14 +31,16 @@ func main() {
 		fatalLog("CreateMutex failed: " + err.Error())
 	}
 
-	const targetExe = "mihomo.exe"
+	// 3. 核心修复：使用绝对路径启动，规避 Go 的安全限制
+	targetExe := filepath.Join(workDir, "mihomo.exe")
 	const lockFile = "tun_on.lock"
 
 	if _, err := os.Stat(targetExe); os.IsNotExist(err) {
-		fatalLog(fmt.Sprintf("Kernel not found: %s in %s", targetExe, workDir))
+		fatalLog(fmt.Sprintf("Kernel not found: %s", targetExe))
 	}
 
-	cmd := exec.Command(targetExe, "-d", ".")
+	// 4. 启动进程
+	cmd := exec.Command(targetExe, "-d", workDir) // 显式指定工作目录
 	cmd.SysProcAttr = &windows.SysProcAttr{
 		CreationFlags: windows.CREATE_NO_WINDOW,
 	}
@@ -45,7 +49,8 @@ func main() {
 		fatalLog("Start mihomo failed: " + err.Error())
 	}
 
-	if _, err := os.Stat(lockFile); err == nil {
+	// 5. 检查 lock 文件并注入配置
+	if _, err := os.Stat(filepath.Join(workDir, lockFile)); err == nil {
 		go startConfigInjector("http://127.0.0.1:9090/configs")
 	}
 
@@ -61,7 +66,7 @@ func startConfigInjector(apiURL string) {
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				time.Sleep(500 * time.Millisecond)
+				time.Sleep(1000 * time.Millisecond) // 给内核一点启动时间
 				req, _ := http.NewRequest("PATCH", apiURL, bytes.NewBuffer(jsonData))
 				req.Header.Set("Content-Type", "application/json")
 				if pr, perr := client.Do(req); perr == nil {
@@ -70,7 +75,7 @@ func startConfigInjector(apiURL string) {
 				}
 			}
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
