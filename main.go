@@ -16,6 +16,7 @@ import (
 
 func isAdmin() bool {
 	var token windows.Token
+	// 修正：只需 1 个参数，返回 2 个值
 	err := windows.OpenCurrentProcessToken(windows.TOKEN_QUERY, &token)
 	if err != nil {
 		return false
@@ -32,6 +33,7 @@ func runAsAdmin() {
 	cwdPtr, _ := syscall.UTF16PtrFromString(cwd)
 	argPtr, _ := syscall.UTF16PtrFromString("")
 
+	// 修正：showCmd 使用 int32 显式定义以匹配调用
 	var showCmd int32 = windows.SW_HIDE
 	windows.ShellExecute(0, verb, exePtr, argPtr, cwdPtr, showCmd)
 }
