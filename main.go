@@ -6,20 +6,37 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
+func isProcessRunning(name string) bool {
+	h, _ := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if h == 0 { return false }
+	defer windows.CloseHandle(h)
+	var pe windows.ProcessEntry32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	currPid := uint32(os.Getpid())
+	if err := windows.Process32First(h, &pe); err != nil { return false }
+	for {
+		pname := windows.UTF16ToString(pe.ExeFile[:])
+		if strings.EqualFold(pname, name) && pe.ProcessID != currPid {
+			return true
+		}
+		if err := windows.Process32Next(h, &pe); err != nil { break }
+	}
+	return false
+}
+
 func main() {
 	p, _ := os.Executable()
 	d := filepath.Dir(p)
 	os.Chdir(d)
 
-	m, _ := windows.UTF16PtrFromString("Local\\MihomoRun_GlobalMutex")
-	_, err := windows.CreateMutex(nil, false, m)
-	if err != nil && err == windows.ERROR_ALREADY_EXISTS {
+	if isProcessRunning(filepath.Base(p)) {
 		os.Exit(0)
 	}
 
@@ -28,7 +45,6 @@ func main() {
 
 	job, _ := windows.CreateJobObject(nil, nil)
 	if job != 0 {
-		defer windows.CloseHandle(job)
 		var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 		info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 		windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
