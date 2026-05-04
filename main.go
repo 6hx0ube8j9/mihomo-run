@@ -16,7 +16,6 @@ import (
 
 func isAdmin() bool {
 	var token windows.Token
-	// 修正：OpenCurrentProcessToken 接收 2 个参数，返回 1 个 error
 	err := windows.OpenCurrentProcessToken(windows.TOKEN_QUERY, &token)
 	if err != nil {
 		return false
