@@ -20,11 +20,12 @@ jobs:
           go-version: '1.22'
           cache: false
 
-      - name: Install Resource Tools
-        run: go install github.com/akavel/rsrc@latest
-
-      - name: Build with Hardened Manifest
+      - name: Build
         run: |
+          go install github.com/akavel/rsrc@latest
+          $GOPATH = go env GOPATH
+          $RSRC = Join-Path $GOPATH "bin" "rsrc.exe"
+
           if (Test-Path "go.mod") { rm go.mod }
           go mod init mihomo-run
           go get golang.org/x/sys/windows
@@ -45,9 +46,8 @@ jobs:
           "@
           $manifest | Out-File -FilePath "app.manifest" -Encoding utf8
 
-          $(go env GOPATH)/bin/rsrc -manifest app.manifest -o rsrc.syso
+          & $RSRC -manifest app.manifest -o rsrc.syso
 
-          # 3. 编译：-H windowsgui 确保无控制台，嵌入资源确保 UAC 弹出
           $env:GOOS="windows"
           $env:GOARCH="amd64"
           go build -ldflags="-H windowsgui -s -w" -o mihomo-run.exe main.go
