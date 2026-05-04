@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true 
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -24,9 +24,11 @@ jobs:
         run: |
           if (Test-Path "go.mod") { rm go.mod }
           go mod init mihomo-run
+          # 下载 windows 扩展包
+          go get golang.org/x/sys/windows
           go mod tidy
-          # 强制指定 GOOS 为 windows
           $env:GOOS="windows"
+          # 调试建议：先去掉 -H windowsgui 看看有没有报错输出
           go build -ldflags="-H windowsgui -s -w" -o mihomo-run.exe main.go
 
       - name: Upload Artifact
