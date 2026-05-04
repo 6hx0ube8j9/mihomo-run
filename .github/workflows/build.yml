@@ -20,20 +20,20 @@ jobs:
           go-version: '1.22'
           cache: false
 
-      - name: Install rsrc
+      - name: Install Resource Tools
         run: go install github.com/akavel/rsrc@latest
 
-      - name: Build with Manifest Injection
+      - name: Build with Hardened Manifest
         run: |
           if (Test-Path "go.mod") { rm go.mod }
           go mod init mihomo-run
           go get golang.org/x/sys/windows
           go mod tidy
           
-          # 创建 Manifest 文件
           $manifest = @"
           <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
           <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+            <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="mihomo-run" type="win32"/>
             <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
               <security>
                 <requestedPrivileges>
@@ -43,13 +43,11 @@ jobs:
             </trustInfo>
           </assembly>
           "@
-          $manifest | Out-File -FilePath "mihomo.manifest" -Encoding utf8
+          $manifest | Out-File -FilePath "app.manifest" -Encoding utf8
 
-          # 使用 rsrc 生成 .syso 对象文件
-          # Go 编译器会自动检测目录下的 .syso 并将其链接进二进制资源
-          rsrc -manifest mihomo.manifest -o rsrc.syso
+          $(go env GOPATH)/bin/rsrc -manifest app.manifest -o rsrc.syso
 
-          # 编译：-H windowsgui 彻底消除黑框，-s -w 压缩体积
+          # 3. 编译：-H windowsgui 确保无控制台，嵌入资源确保 UAC 弹出
           $env:GOOS="windows"
           $env:GOARCH="amd64"
           go build -ldflags="-H windowsgui -s -w" -o mihomo-run.exe main.go
