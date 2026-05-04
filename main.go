@@ -32,7 +32,8 @@ func runAsAdmin() {
 	cwdPtr, _ := syscall.UTF16PtrFromString(cwd)
 	argPtr, _ := syscall.UTF16PtrFromString("")
 
-	windows.ShellExecute(0, verb, exePtr, argPtr, cwdPtr, windows.SW_HIDE)
+	var showCmd int32 = windows.SW_HIDE
+	windows.ShellExecute(0, verb, exePtr, argPtr, cwdPtr, showCmd)
 }
 
 func isProcessRunning(name string) bool {
@@ -56,7 +57,7 @@ func isProcessRunning(name string) bool {
 func main() {
 	if !isAdmin() {
 		runAsAdmin()
-		os.Exit(0) 
+		os.Exit(0)
 	}
 
 	p, _ := os.Executable()
