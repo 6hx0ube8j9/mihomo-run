@@ -7,11 +7,33 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func isAdmin() bool {
+	var token windows.Token
+	err := windows.OpenCurrentProcessToken(windows.TOKEN_QUERY, &token)
+	if err != nil {
+		return false
+	}
+	defer token.Close()
+	return token.IsElevated()
+}
+
+func runAsAdmin() {
+	verb, _ := syscall.UTF16PtrFromString("runas")
+	exe, _ := os.Executable()
+	cwd, _ := os.Getwd()
+	exePtr, _ := syscall.UTF16PtrFromString(exe)
+	cwdPtr, _ := syscall.UTF16PtrFromString(cwd)
+	argPtr, _ := syscall.UTF16PtrFromString("")
+
+	windows.ShellExecute(0, verb, exePtr, argPtr, cwdPtr, windows.SW_HIDE)
+}
 
 func isProcessRunning(name string) bool {
 	h, _ := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
@@ -32,6 +54,11 @@ func isProcessRunning(name string) bool {
 }
 
 func main() {
+	if !isAdmin() {
+		runAsAdmin()
+		os.Exit(0) 
+	}
+
 	p, _ := os.Executable()
 	d := filepath.Dir(p)
 	os.Chdir(d)
@@ -40,7 +67,9 @@ func main() {
 		os.Exit(0)
 	}
 
-	exec.Command("taskkill", "/F", "/IM", "mihomo.exe", "/T").Run()
+	killCmd := exec.Command("taskkill", "/F", "/IM", "mihomo.exe", "/T")
+	killCmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	killCmd.Run()
 	time.Sleep(500 * time.Millisecond)
 
 	job, _ := windows.CreateJobObject(nil, nil)
