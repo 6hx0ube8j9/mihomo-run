@@ -16,8 +16,8 @@ import (
 
 func isAdmin() bool {
 	var token windows.Token
-	// 修正：该函数在 x/sys/windows 中只返回一个 error
-	err := windows.OpenCurrentProcessToken(windows.TOKEN_QUERY, &token)
+	// 修正：在 x/sys/windows 中，OpenProcessToken 需要进程句柄、权限掩码和 Token 指针
+	err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token)
 	if err != nil {
 		return false
 	}
