@@ -1,0 +1,29 @@
+name: Build Mihomo Run
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build Binary
+        run: |
+          go mod init mihomo-run || true
+          go mod tidy
+          go build -ldflags="-H windowsgui -s -w" -o mihomo-run.exe main.go
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-run-binary
+          path: mihomo-run.exe
