@@ -5,6 +5,9 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # 解决 Node.js 20 弃用警告
+
 jobs:
   build:
     runs-on: windows-latest
@@ -14,12 +17,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.22' # 使用较新版本
+          cache: false      # 禁用缓存以避免找不到 go.sum 的错误
 
       - name: Build Binary
         run: |
-          go mod init mihomo-run || true
+          if (Test-Path "go.mod") { rm go.mod }
+          go mod init mihomo-run
           go mod tidy
+          # 强制指定 GOOS 为 windows
+          $env:GOOS="windows"
           go build -ldflags="-H windowsgui -s -w" -o mihomo-run.exe main.go
 
       - name: Upload Artifact
