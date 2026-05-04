@@ -8,12 +8,21 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"unsafe"
+)
+
+var (
+	kernel32        = syscall.NewLazyDLL("kernel32.dll")
+	procCreateMutex = kernel32.NewProc("CreateMutexW")
 )
 
 func main() {
-	_, err := syscall.CreateMutex(nil, false, syscall.StringToUTF16Ptr("Global\\MihomoRunMutex-123456"))
-	if err != nil {
-		os.Exit(0)
+	mutexName, _ := syscall.UTF16PtrFromString("Global\\MihomoRunMutex-123456")
+	ret, _, err := procCreateMutex.Call(0, 0, uintptr(unsafe.Pointer(mutexName)))
+	if ret == 0 || err != nil {
+		if err.(syscall.Errno) == 183 { // ERROR_ALREADY_EXISTS
+			os.Exit(0)
+		}
 	}
 
 	exePath, _ := os.Executable()
