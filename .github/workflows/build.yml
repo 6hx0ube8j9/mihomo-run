@@ -5,9 +5,6 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: windows-latest
@@ -22,15 +19,18 @@ jobs:
 
       - name: Build
         run: |
+          # 1. 安装并准确定位 rsrc
           go install github.com/akavel/rsrc@latest
-          $GOPATH = go env GOPATH
-          $RSRC = Join-Path $GOPATH "bin" "rsrc.exe"
+          $env:GOPATH = (go env GOPATH)
+          $RSRC_EXE = Join-Path $env:GOPATH "bin" "rsrc.exe"
 
+          # 2. 依赖初始化
           if (Test-Path "go.mod") { rm go.mod }
           go mod init mihomo-run
           go get golang.org/x/sys/windows
           go mod tidy
           
+          # 3. 创建权限清单 (必须包含 assemblyIdentity 以确保合规)
           $manifest = @"
           <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
           <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
@@ -46,8 +46,10 @@ jobs:
           "@
           $manifest | Out-File -FilePath "app.manifest" -Encoding utf8
 
-          & $RSRC -manifest app.manifest -o rsrc.syso
+          # 4. 关键步骤：使用 & 调用绝对路径，确保 rsrc.syso 生成在当前目录
+          & $RSRC_EXE -manifest app.manifest -o rsrc.syso
 
+          # 5. 编译：Go 会自动检测并嵌入同目录下的 rsrc.syso
           $env:GOOS="windows"
           $env:GOARCH="amd64"
           go build -ldflags="-H windowsgui -s -w" -o mihomo-run.exe main.go
