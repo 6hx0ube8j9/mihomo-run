@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -23,22 +24,19 @@ func main() {
 		os.Exit(0)
 	}
 
-	exec.Command("tasklist").Run() 
 	exec.Command("taskkill", "/F", "/IM", "mihomo.exe", "/T").Run()
 	time.Sleep(500 * time.Millisecond)
 
 	job, _ := windows.CreateJobObject(nil, nil)
 	if job != 0 {
-		info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
-			BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
-				LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-			},
-		}
+		var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+		info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+		
 		_, _, _ = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
 			uintptr(job),
 			uintptr(windows.JobObjectExtendedLimitInformation),
-			uintptr(windows.Pointer(&info)),
-			uintptr(windows.SizeofJobObjectExtendedLimitInformation),
+			uintptr(unsafe.Pointer(&info)),
+			uintptr(uint32(unsafe.Sizeof(info))),
 		)
 	}
 
