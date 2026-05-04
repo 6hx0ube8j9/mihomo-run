@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,12 +13,12 @@ import (
 )
 
 func main() {
-	exePath, _ := os.Executable()
-	workDir := filepath.Dir(exePath)
-	os.Chdir(workDir)
+	p, _ := os.Executable()
+	d := filepath.Dir(p)
+	os.Chdir(d)
 
-	mutexName, _ := windows.UTF16PtrFromString("Local\\MihomoRun_GlobalMutex")
-	_, err := windows.CreateMutex(nil, false, mutexName)
+	m, _ := windows.UTF16PtrFromString("Local\\MihomoRun_GlobalMutex")
+	_, err := windows.CreateMutex(nil, false, m)
 	if err != nil && err == windows.ERROR_ALREADY_EXISTS {
 		os.Exit(0)
 	}
@@ -29,10 +28,10 @@ func main() {
 
 	job, _ := windows.CreateJobObject(nil, nil)
 	if job != 0 {
+		defer windows.CloseHandle(job)
 		var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 		info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-		
-		_, _, _ = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
+		windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject").Call(
 			uintptr(job),
 			uintptr(windows.JobObjectExtendedLimitInformation),
 			uintptr(unsafe.Pointer(&info)),
@@ -40,40 +39,40 @@ func main() {
 		)
 	}
 
-	targetExe := filepath.Join(workDir, "mihomo.exe")
-	if _, err := os.Stat(targetExe); os.IsNotExist(err) {
-		fatalLog("Kernel not found")
+	target := filepath.Join(d, "mihomo.exe")
+	if _, err := os.Stat(target); os.IsNotExist(err) {
+		os.Exit(1)
 	}
 
-	cmd := exec.Command(targetExe, "-d", workDir)
+	cmd := exec.Command(target, "-d", d)
 	cmd.SysProcAttr = &windows.SysProcAttr{
 		CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_BREAKAWAY_FROM_JOB,
 	}
 
 	if err := cmd.Start(); err != nil {
-		fatalLog(err.Error())
+		os.Exit(1)
 	}
 
 	if job != 0 {
-		hProcess, _ := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
-		_ = windows.AssignProcessToJobObject(job, hProcess)
-		windows.CloseHandle(hProcess)
+		h, _ := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+		windows.AssignProcessToJobObject(job, h)
+		windows.CloseHandle(h)
 	}
 
-	if _, err := os.Stat(filepath.Join(workDir, "tun_on.lock")); err == nil {
+	if _, err := os.Stat(filepath.Join(d, "tun_on.lock")); err == nil {
 		go func() {
 			api := "http://127.0.0.1:9090/configs"
-			client := &http.Client{Timeout: 3 * time.Second}
-			payload := []byte(`{"tun":{"enable":true}}`)
+			c := &http.Client{Timeout: 3 * time.Second}
+			b := []byte(`{"tun":{"enable":true}}`)
 			for i := 0; i < 100; i++ {
-				resp, err := client.Get(api)
+				r, err := c.Get(api)
 				if err == nil {
-					resp.Body.Close()
-					if resp.StatusCode == 200 {
-						time.Sleep(1 * time.Second)
-						req, _ := http.NewRequest("PATCH", api, bytes.NewBuffer(payload))
+					r.Body.Close()
+					if r.StatusCode == 200 {
+						time.Sleep(time.Second)
+						req, _ := http.NewRequest("PATCH", api, bytes.NewBuffer(b))
 						req.Header.Set("Content-Type", "application/json")
-						if pr, perr := client.Do(req); perr == nil {
+						if pr, perr := c.Do(req); perr == nil {
 							pr.Body.Close()
 							return
 						}
@@ -84,12 +83,5 @@ func main() {
 		}()
 	}
 
-	_ = cmd.Wait()
-}
-
-func fatalLog(msg string) {
-	f, _ := os.OpenFile("run_error.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	defer f.Close()
-	_, _ = f.WriteString(fmt.Sprintf("[%s] %s\n", time.Now().Format("15:04:05"), msg))
-	os.Exit(1)
+	cmd.Wait()
 }
