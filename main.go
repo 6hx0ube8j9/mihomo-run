@@ -21,6 +21,18 @@ import (
 
 const APP_MUTEX = "Mihomo_Unique_Mutex"
 
+func initLog() {
+	// 创建或追加到 debug.log
+	f, err := os.OpenFile("debug.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return
+	}
+	log.SetOutput(f)
+	log.Println("========================================")
+	log.Println("程序已启动: " + time.Now().Format("2006-01-02 15:04:05"))
+	log.Println("========================================")
+}
+
 func main() {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -57,6 +69,7 @@ func main() {
 
 	// 3. 核心组件初始化 (按严格依赖顺序)
 	configMgr := config.NewConfigManager(baseDir, exePath)
+	log.Printf("[Main] Config dir: %s", baseDir)
 	
 	kernelHooks := kernel.KernelHooks{
 		OnKernelStarted: func() {
