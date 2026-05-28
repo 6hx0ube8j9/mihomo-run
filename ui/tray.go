@@ -570,7 +570,7 @@ func (tm *TrayManager) LaunchWebUI() {
 
 // SetupTrayUI 綁定選單事件並組裝整個 UI 佈局 (完成原 main 的回呼註冊)
 func (tm *TrayManager) SetupTrayUI() {
-	tm.cm.SetSystemInitializing(1)
+	tm.cm.SetSystemInitializing(true)
 
 	tm.ToggleAutoStart(tm.CheckAutoStartStatus())
 	tm.cm.EnsureDefaultConfig()
