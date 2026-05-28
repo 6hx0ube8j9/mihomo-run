@@ -1,0 +1,49 @@
+name: Build mihomo-run
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25' 
+          cache: true   
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          go mod tidy
+
+      - name: Install and Run go-winres
+        shell: pwsh
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          $GOBIN = "$(go env GOPATH)\bin"
+          
+          if (Test-Path "icons/app.ico") {
+            & "$GOBIN\go-winres.exe" simply --icon icons/app.ico --manifest main.manifest
+          } else {
+            exit 1
+          }
+
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED="1"
+          $env:GOARCH="amd64"          
+          go build -ldflags="-s -w -H=windowsgui" -o mihomo-run.exe .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mihomo-run
+          path: mihomo-run.exe
