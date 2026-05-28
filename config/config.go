@@ -12,19 +12,15 @@ import (
 
 const CONFIG_FILE = "mihomo-run.json"
 
-// ConfigManager 統一管理程式的所有配置項目與執行期狀態
 type ConfigManager struct {
-	// 基礎路徑資訊（初始化後唯讀，不需加鎖）
 	baseDir string
 	exePath string
 
-	// 1. 字典與模式切換：使用讀寫鎖保護
 	configMu         sync.RWMutex
 	configData       map[string]string
 	currentModeState string
-	lastAppliedProxy bool // 修正原版 lastAppliedProxyState 鎖外裸讀寫的問題
+	lastAppliedProxy bool
 
-	// 2. 核心狀態標記：使用原子操作（atomic）確保高效且並發安全
 	isSystemInitializing         int32
 	isSyncing                    int32
 	globalOpID                   int32
@@ -37,34 +33,27 @@ type ConfigManager struct {
 	lastWrittenVersion           int32
 	lastState                    int32
 	tunErrorCounter              int32
-	atomicProxyState             int32 // 系統代理原子狀態
-	atomicTunState               int32 // TUN網卡原子狀態
-	lastClickTime                int64 // 納秒時間戳使用 int64
+	atomicProxyState             int32 
+	atomicTunState               int32
+	lastClickTime                int64
 }
 
-// NewConfigManager 初始化配置管理器
 func NewConfigManager(baseDir, exePath string) *ConfigManager {
 	return &ConfigManager{
 		baseDir:              baseDir,
 		exePath:              exePath,
 		configData:           make(map[string]string),
-		isSystemInitializing: 1,  // 預設系統正在初始化
-		lastState:            -1, // 預設原版 lastState 為 -1
+		isSystemInitializing: 1, 
+		lastState:            -1,
 	}
 }
 
-// ==========================================
-// 核心配置讀寫方法 (100% 還原原版邏輯，提升並發安全)
-// ==========================================
-
-// GetJsonConfig 安全地讀取內存緩存中的配置項目
 func (cm *ConfigManager) GetJsonConfig(key string) string {
 	cm.configMu.RLock()
 	defer cm.configMu.RUnlock()
 	return cm.configData[key]
 }
 
-// EnsureDefaultConfig 確保默認配置存在，並在鎖外進行安全的原子寫入
 func (cm *ConfigManager) EnsureDefaultConfig() {
 	cfgPath := filepath.Join(cm.baseDir, CONFIG_FILE)
 	defaults := map[string]string{
@@ -78,7 +67,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		"secret":              "",
 	}
 
-	// 1. 讀取現有磁碟文件
 	fileData := make(map[string]string)
 	f, err := os.Open(cfgPath)
 	if err == nil {
@@ -86,7 +74,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		f.Close()
 	}
 
-	// 2. 磁碟文件缺啥補啥
 	hasChanges := false
 	for k, v := range defaults {
 		fileVal, exists := fileData[k]
@@ -96,7 +83,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		}
 	}
 
-	// 3. 磁碟文件與默認值不符時，在鎖外進行安全寫入
 	if hasChanges || err != nil {
 		if b, marshalErr := json.Marshal(fileData); marshalErr == nil {
 			tmpPath := cfgPath + ".tmp"
@@ -106,7 +92,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		}
 	}
 
-	// 4. 將最新、最全的磁碟配置單向覆蓋到內存緩存中（最高權威）
 	cm.configMu.Lock()
 	for k, v := range fileData {
 		cm.configData[k] = v
@@ -116,7 +101,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	currentMode := cm.configData["mode"]
 	cm.configMu.Unlock()
 
-	// 5. 極速刷新原子狀態
 	if currentProxy == "true" {
 		cm.SetProxyState(true)
 	} else {
@@ -132,7 +116,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	cm.SetCurrentModeState(currentMode)
 }
 
-// SaveJsonConfig 保存配置到磁碟（內含作者優秀的 CAS 異步寫盤版本控制邏輯）
 func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 	cm.configMu.Lock()
 	if key != "" {
@@ -142,7 +125,6 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		}
 		cm.configData[key] = value
 
-		// 即時同步原子變數，保持狀態機一致
 		switch key {
 		case "proxy":
 			if value == "true" {
@@ -168,7 +150,6 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		return
 	}
 
-	// 異步 CAS 刷盤版本控制
 	myVersion := atomic.AddInt32(&cm.configVersion, 1)
 
 	go func(dataToWrite []byte, version int32) {
@@ -198,14 +179,10 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 	}(b, myVersion)
 }
 
-// ==========================================
-// 並發安全的公開方法 (Getter / Setter)
-// ==========================================
 
 func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
 func (cm *ConfigManager) ExePath() string { return cm.exePath }
 
-// 代理鎖協議保護的變數
 func (cm *ConfigManager) GetLastAppliedProxy() bool {
 	cm.configMu.RLock()
 	defer cm.configMu.RUnlock()
@@ -230,7 +207,6 @@ func (cm *ConfigManager) SetCurrentModeState(mode string) {
 	cm.currentModeState = mode
 }
 
-// 原子標記控制 (Atomic flags)
 func (cm *ConfigManager) IsSystemInitializing() bool {
 	return atomic.LoadInt32(&cm.isSystemInitializing) == 1
 }
@@ -255,7 +231,6 @@ func (cm *ConfigManager) SetSyncing(val bool) {
 	atomic.StoreInt32(&cm.isSyncing, i)
 }
 
-// 使用 CAS 進行配置同步保護
 func (cm *ConfigManager) CompareAndSwapSyncing(oldVal, newVal int32) bool {
 	return atomic.CompareAndSwapInt32(&cm.isSyncing, oldVal, newVal)
 }
@@ -364,8 +339,8 @@ func (cm *ConfigManager) CheckAndThrottleClick(thresholdNano int64) bool {
 	now := time.Now().UnixNano()
 	last := atomic.LoadInt64(&cm.lastClickTime)
 	if now-last < thresholdNano {
-		return false // 被截流
+		return false
 	}
 	atomic.StoreInt64(&cm.lastClickTime, now)
-	return true // 允許執行
+	return true
 }
