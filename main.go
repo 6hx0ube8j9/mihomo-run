@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,37 +20,24 @@ import (
 
 const APP_MUTEX = "Mihomo_Unique_Mutex"
 
-func initLog() {
-    // 强制写到 C 盘根目录，确保不是当前目录权限问题
-    f, err := os.OpenFile("C:\\mihomo_debug.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-    if err != nil {
-        return
-    }
-    log.SetOutput(f)
-    log.Println("--- 程序已启动 ---")
-}
-
 func main() {
 	exePath, err := os.Executable()
 	if err != nil {
-		log.Fatalf("[Main] Failed to get executable path: %v", err)
 		return
 	}
 	baseDir := filepath.Dir(exePath)
 	_ = os.Chdir(baseDir)
 
-	// 1. 单例锁保护 (避免用户疯狂双击导致多开)
 	mName, _ := windows.UTF16PtrFromString(APP_MUTEX)
 	hM, err := windows.CreateMutex(nil, false, mName)
 	if err != nil || windows.GetLastError() == windows.ERROR_ALREADY_EXISTS {
 		if hM != 0 {
 			windows.CloseHandle(hM)
 		}
-		return // 程序已在运行，静默退出
+		return
 	}
 	defer windows.CloseHandle(hM)
 
-	// 2. 检查自启与 UAC 提权
 	isAutostart := false
 	for _, arg := range os.Args {
 		if arg == "---autostart" {
@@ -65,71 +51,48 @@ func main() {
 		return
 	}
 
-	// 3. 核心组件初始化 (按严格依赖顺序)
 	configMgr := config.NewConfigManager(baseDir, exePath)
-	log.Printf("[Main] Config dir: %s", baseDir)
-	
 	kernelHooks := kernel.KernelHooks{
-		OnKernelStarted: func() {
-			log.Println("[Main] Kernel started successfully.")
-		},
+		OnKernelStarted: func() {},
 	}
 	kernelMgr := kernel.NewKernelManager(configMgr, kernelHooks)
-	
-	// 核心修复：激活 Job Object！防止 mihomo.exe 变成孤儿/僵尸进程
 	kernelMgr.InitJobObject()
 
 	proxyMgr := sysproxy.NewProxyManager(configMgr, nil)
 	trayMgr := ui.NewTrayManager(configMgr, kernelMgr, proxyMgr)
 
-	// 4. 监听系统中断信号 (比如在终端按 Ctrl+C，或者被系统要求结束)
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("[Main] Received interrupt signal, gracefully shutting down...")
-		systray.Quit() // 触发下方 Run 的 onExit 回调
+		systray.Quit()
 	}()
 
-	// 5. 极速启动后台事件监听协程
 	go func() {
-		// 仅给 systray 极短的内存分配时间，直接启动
 		time.Sleep(100 * time.Millisecond)
 		go kernelMgr.MonitorKernelDaemon()
 		go trayMgr.MonitorIconState()
 		go trayMgr.WatchTunState()
 	}()
 
-	// 6. 运行托盘 UI (阻塞主线程，直到程序退出)
 	systray.Run(trayMgr.SetupTrayUI, func() {
-		log.Println("[Main] Performing cleanup before exit...")
-		
-		// 标记程序正在退出，通知所有组件立刻结束轮询和等待
 		configMgr.MarkAsExiting()
 
-		// 优雅清理 WebUI 残留的调试窗口
 		client := &http.Client{Timeout: 500 * time.Millisecond}
-		apiURL := "http://127.0.0.1:52719/json"
-		if resp, err := client.Get(apiURL); err == nil {
+		if resp, err := client.Get("http://127.0.0.1:52719/json"); err == nil {
 			var targets []map[string]interface{}
 			if json.NewDecoder(resp.Body).Decode(&targets) == nil {
 				for _, t := range targets {
 					if id, ok := t["id"].(string); ok {
-						if closeResp, closeErr := client.Get("http://127.0.0.1:52719/json/close/" + id); closeErr == nil {
-							_ = closeResp.Body.Close()
-						}
+						_, _ = client.Get("http://127.0.0.1:52719/json/close/" + id)
 					}
 				}
 			}
 			resp.Body.Close()
 		}
 
-		// 确保退出时系统代理已关闭，防止用户断网
 		proxyMgr.SetProxyRegistry(false)
-		
-		// 稍微留一点时间让底层的 cleanup 执行完毕
 		time.Sleep(100 * time.Millisecond)
-		log.Println("[Main] Cleanup finished, goodbye!")
 	})
 }
 
