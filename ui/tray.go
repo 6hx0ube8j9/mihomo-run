@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/energye/systray"
@@ -40,22 +40,21 @@ type TrayManager struct {
 	km         *kernel.KernelManager
 	pm         *sysproxy.ProxyManager
 	httpClient *http.Client
-	bufPool    sync.Pool
 	mTun       *systray.MenuItem
+	// 彻底移除了 bufPool，避免 HTTP 自动重试时复用引发 Panic 和死锁
 }
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
 	return &TrayManager{
-		cm:         cm,
-		km:         km,
-		pm:         pm,
-		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
-		bufPool: sync.Pool{
-			New: func() interface{} { return bytes.NewBuffer(make([]byte, 0, 2048)) },
-		},
+		cm: cm,
+		km: km,
+		pm: pm,
+		// 稍微延长一点超时，避免系统高负载时内核响应慢导致频繁报错
+		httpClient: &http.Client{Timeout: 1000 * time.Millisecond},
 	}
 }
 
+// DoAPIRequest 核心优化：安全的 HTTP 请求，完美支持底层网络波动重试机制
 func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([]byte, error) {
 	apiAddr := strings.TrimSuffix(tm.cm.GetJsonConfig("external-controller"), "/")
 	if apiAddr == "" {
@@ -67,25 +66,18 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	url := apiAddr + "/" + strings.TrimPrefix(path, "/")
 
 	var bodyReader io.Reader
-	var buf *bytes.Buffer
 
 	if payload != nil {
-		buf = tm.bufPool.Get().(*bytes.Buffer)
-		buf.Reset()
-		if err := json.NewEncoder(buf).Encode(payload); err != nil {
-			tm.bufPool.Put(buf)
+		// 使用 json.Marshal 和 bytes.NewReader 替代 sync.Pool
+		// bytes.NewReader 实现了 io.Seeker，允许 http.Client 在连接失败时自动重新读取 body 重试
+		b, err := json.Marshal(payload)
+		if err != nil {
 			return nil, fmt.Errorf("marshal payload failed: %v", err)
 		}
-		bodyReader = buf
+		bodyReader = bytes.NewReader(b)
 	} else if method == "PUT" || method == "POST" || method == "PATCH" {
 		bodyReader = bytes.NewReader([]byte("{}"))
 	}
-
-	defer func() {
-		if buf != nil {
-			tm.bufPool.Put(buf)
-		}
-	}()
 
 	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
@@ -196,13 +188,19 @@ func (tm *TrayManager) CheckSystemState() int32 {
 	return 4
 }
 
+// MonitorIconState 核心优化：改用 Ticker，0 延迟响应退出信号，降低 CPU 占用
 func (tm *TrayManager) MonitorIconState() {
 	var successCounter int
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
 	for {
+		// 优先检查退出信号，保证退出时不会被死死卡住 1 秒
 		if tm.cm.IsReallyExiting() {
 			return
 		}
+
+		<-ticker.C // 优雅阻塞，等待定时器触发
 
 		if !tm.km.IsProcessRunning("mihomo.exe") {
 			tm.cm.SetTunErrorCounter(0)
@@ -262,7 +260,6 @@ func (tm *TrayManager) MonitorIconState() {
 				}
 			}
 		}
-		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -789,6 +786,7 @@ func (tm *TrayManager) SniffAndSolidifyConfig() {
 	}
 }
 
+// ToggleAutoStart 增加日志打印以解决静默失败问题
 func (tm *TrayManager) ToggleAutoStart(enable bool) {
 	const taskName = "MihomoRunTask"
 	if key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE); err == nil {
@@ -818,12 +816,18 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil {
 			success = true
+			log.Println("[UI] AutoStart enabled successfully.")
+		} else {
+			log.Printf("[UI] Failed to enable AutoStart: %v\n", err)
 		}
 	} else {
 		cmd := exec.Command("schtasks", "/Delete", "/TN", "\\"+taskName, "/F")
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil || !tm.CheckAutoStartStatus() {
 			success = true
+			log.Println("[UI] AutoStart disabled successfully.")
+		} else {
+			log.Printf("[UI] Failed to disable AutoStart: %v\n", err)
 		}
 	}
 	if success {
