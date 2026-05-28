@@ -279,7 +279,6 @@ func (cm *ConfigManager) SetHasFirstSynced(val bool) {
 	atomic.StoreInt32(&cm.hasFirstSynced, i)
 }
 
-// CheckAndThrottleClick 用于 UI 防连点限制
 func (cm *ConfigManager) CheckAndThrottleClick(throttleTimeMs int64) bool {
 	now := time.Now().UnixMilli()
 	last := atomic.LoadInt64(&cm.lastClickTime)
@@ -288,4 +287,12 @@ func (cm *ConfigManager) CheckAndThrottleClick(throttleTimeMs int64) bool {
 	}
 	atomic.StoreInt64(&cm.lastClickTime, now)
 	return true
+}
+
+func (cm *ConfigManager) CompareAndSwapFocusing(oldVal, newVal int32) bool {
+	return atomic.CompareAndSwapInt32(&cm.isFocusing, oldVal, newVal)
+}
+
+func (cm *ConfigManager) SetFocusing(val int32) {
+	atomic.StoreInt32(&cm.isFocusing, val)
 }
