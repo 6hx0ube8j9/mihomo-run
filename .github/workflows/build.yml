@@ -30,7 +30,7 @@ jobs:
           $GOBIN = "$(go env GOPATH)\bin"
           
           if (Test-Path "ui/icons/app.ico") {
-            & "$GOBIN\rsrc.exe" -manifest main.manifest -ico icons/app.ico -o rsrc.syso
+            & "$GOBIN\rsrc.exe" -manifest main.manifest -ico ui/icons/app.ico -o rsrc.syso
           } else {
             exit 1
           }
