@@ -139,11 +139,11 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			return
 		}
 
-		if km.IsProcessRunning("mihomo.exe") {
+		if km.kmIsProcessRunningActive("mihomo.exe") {
 			if km.cm.IsSystemInitializing() && !km.cm.IsSyncing() {
 				km.cm.SetSystemInitializing(false)
 			}
-			time.Sleep(2 * time.Second)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 
@@ -158,42 +158,38 @@ func (km *KernelManager) MonitorKernelDaemon() {
 		cmd.Dir = absBaseDir
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 
-		if err := cmd.Start(); err != nil {
+		if err := cmd.Start(); err == nil {
+			km.cm.SetKernelActive(true)
+
+			if km.hooks.OnKernelStarted != nil {
+				km.hooks.OnKernelStarted()
+			}
+
+			if km.hJob != 0 {
+				hp, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
+				if err == nil {
+					_ = windows.AssignProcessToJobObject(km.hJob, hp)
+					windows.CloseHandle(hp)
+				}
+			}
+
+			go func() {
+				time.Sleep(1000 * time.Millisecond)
+				if km.cm.IsKernelActive() && km.hooks.OnKernelReady != nil {
+					km.hooks.OnKernelReady()
+				}
+			}()
+
+			_ = cmd.Wait()
+
+			km.cm.SetKernelActive(false)
+		} else {
 			km.cm.SetKernelActive(false)
 			km.cm.SetHasFirstSynced(true)
 			km.cm.SetSystemInitializing(false)
-			time.Sleep(2 * time.Second)
-			continue
 		}
 
-		km.cm.SetKernelActive(true)
-		if km.hooks.OnKernelStarted != nil {
-			km.hooks.OnKernelStarted()
-		}
-
-		if km.hJob != 0 {
-			hp, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
-			if err == nil {
-				_ = windows.AssignProcessToJobObject(km.hJob, hp)
-				windows.CloseHandle(hp)
-			}
-		}
-
-		go func() {
-			time.Sleep(1000 * time.Millisecond)
-			if km.cm.IsKernelActive() && km.hooks.OnKernelReady != nil {
-				km.hooks.OnKernelReady()
-			}
-		}()
-
-		done := make(chan error, 1)
-		go func() { done <- cmd.Wait() }()
-
-		select {
-		case <-done:
-			km.cm.SetKernelActive(false)
-		case <-time.After(500 * time.Millisecond):
-		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
