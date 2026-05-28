@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/energye/systray"
@@ -40,19 +40,15 @@ type TrayManager struct {
 	km         *kernel.KernelManager
 	pm         *sysproxy.ProxyManager
 	httpClient *http.Client
-	bufPool    sync.Pool
 	mTun       *systray.MenuItem
 }
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
 	return &TrayManager{
-		cm:         cm,
-		km:         km,
-		pm:         pm,
-		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
-		bufPool: sync.Pool{
-			New: func() interface{} { return bytes.NewBuffer(make([]byte, 0, 2048)) },
-		},
+		cm: cm,
+		km: km,
+		pm: pm,
+		httpClient: &http.Client{Timeout: 1000 * time.Millisecond},
 	}
 }
 
@@ -66,76 +62,58 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	}
 	url := apiAddr + "/" + strings.TrimPrefix(path, "/")
 
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		var bodyReader io.Reader
-		var buf *bytes.Buffer
+	var bodyReader io.Reader
 
-		if payload != nil {
-			buf = tm.bufPool.Get().(*bytes.Buffer)
-			buf.Reset()
-			if err := json.NewEncoder(buf).Encode(payload); err != nil {
-				tm.bufPool.Put(buf)
-				lastErr = err
-				continue
-			}
-			bodyReader = buf
-		} else if method == "PUT" || method == "POST" || method == "PATCH" {
-			bodyReader = bytes.NewReader([]byte("{}"))
-		}
-
-		req, err := http.NewRequest(method, url, bodyReader)
+	if payload != nil {
+		b, err := json.Marshal(payload)
 		if err != nil {
-			if buf != nil {
-				tm.bufPool.Put(buf)
-			}
-			return nil, err
+			return nil, fmt.Errorf("marshal payload failed: %v", err)
 		}
-
-		req.Header.Set("Content-Type", "application/json")
-		if secret := tm.cm.GetJsonConfig("secret"); secret != "" {
-			req.Header.Set("Authorization", "Bearer "+secret)
-		}
-
-		resp, err := tm.httpClient.Do(req)
-		if buf != nil {
-			tm.bufPool.Put(buf)
-		}
-
-		if err != nil {
-			lastErr = err
-			time.Sleep(150 * time.Millisecond)
-			continue
-		}
-
-		defer resp.Body.Close()
-
-		if resp.StatusCode == 204 || resp.ContentLength == 0 {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				return nil, nil
-			}
-			return nil, fmt.Errorf("API Status Error: %d", resp.StatusCode)
-		}
-
-		capacity := int64(512)
-		if resp.ContentLength > 0 {
-			capacity = resp.ContentLength
-		}
-		outBuf := bytes.NewBuffer(make([]byte, 0, capacity))
-
-		limitReader := io.LimitReader(resp.Body, 10*1024*1024)
-		if _, err := io.Copy(outBuf, limitReader); err != nil {
-			return nil, fmt.Errorf("read response body failed: %v", err)
-		}
-
-		body := outBuf.Bytes()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return body, fmt.Errorf("API Error: %d, Response: %s", resp.StatusCode, string(body))
-		}
-		return body, nil
+		bodyReader = bytes.NewReader(b)
+	} else if method == "PUT" || method == "POST" || method == "PATCH" {
+		bodyReader = bytes.NewReader([]byte("{}"))
 	}
-	return nil, fmt.Errorf("request failed after retries: %v", lastErr)
+
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if secret := tm.cm.GetJsonConfig("secret"); secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+
+	resp, err := tm.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 204 || resp.ContentLength == 0 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("API Status Error: %d", resp.StatusCode)
+	}
+
+	capacity := int64(512)
+	if resp.ContentLength > 0 {
+		capacity = resp.ContentLength
+	}
+	outBuf := bytes.NewBuffer(make([]byte, 0, capacity))
+
+	limitReader := io.LimitReader(resp.Body, 10*1024*1024)
+	if _, err := io.Copy(outBuf, limitReader); err != nil {
+		return nil, fmt.Errorf("read response body failed: %v", err)
+	}
+
+	body := outBuf.Bytes()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return body, fmt.Errorf("API Error: %d, Response: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
 func (tm *TrayManager) CheckSystemState() int32 {
@@ -205,8 +183,12 @@ func (tm *TrayManager) CheckSystemState() int32 {
 	return 4
 }
 
+// 【融合修复】：这才是真正的 Ticker 事件驱动优化！去掉了死板的 time.Sleep。
 func (tm *TrayManager) MonitorIconState() {
 	var successCounter int
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		if tm.cm.IsReallyExiting() {
 			return
@@ -215,6 +197,7 @@ func (tm *TrayManager) MonitorIconState() {
 		if !tm.km.IsProcessRunning("mihomo.exe") {
 			tm.cm.SetTunErrorCounter(0)
 			successCounter = 0
+
 			if tm.cm.GetLastState() != 0 {
 				tm.UpdateIconByState(0)
 				tm.cm.SetLastState(0)
@@ -226,48 +209,53 @@ func (tm *TrayManager) MonitorIconState() {
 			isInitializing := tm.cm.IsSystemInitializing()
 			isCurrentlySyncing := tm.cm.IsSyncing()
 
-			if isInitializing || isCurrentlySyncing {
-				tm.cm.SetTunErrorCounter(0)
-				if tm.cm.GetLastState() != curr {
-					tm.UpdateIconByState(int(curr))
-					tm.cm.SetLastState(curr)
-				}
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			isBroken := (curr == 0) || (isTunModeInConfig && isPhysicalLost)
+			isBroken := (curr == 0) || (isTunModeInConfig && isPhysicalLost && !isInitializing && !isCurrentlySyncing)
 
 			if isBroken {
 				successCounter = 0
 				if tm.cm.GetTunErrorCounter() < 5 {
 					tm.cm.AddTunErrorCounter(1)
 				}
+
 				if tm.cm.GetTunErrorCounter() > 2 {
 					targetState := int32(1)
 					if curr == 0 {
 						targetState = 0
 					}
+
 					if tm.cm.GetLastState() != targetState {
 						tm.UpdateIconByState(int(targetState))
 						tm.cm.SetLastState(targetState)
 					}
 				}
 			} else {
-				successCounter++
-				currentErrCount := tm.cm.GetTunErrorCounter()
-				if currentErrCount <= 2 || successCounter >= 3 {
-					if successCounter >= 3 {
-						tm.cm.SetTunErrorCounter(0)
-					}
+				if isInitializing || isCurrentlySyncing {
+					// 【修复】：补回了优化版遗漏的清零逻辑，防止状态错乱
+					successCounter = 0
 					if tm.cm.GetLastState() != curr {
 						tm.UpdateIconByState(int(curr))
 						tm.cm.SetLastState(curr)
 					}
+				} else {
+					successCounter++
+					currentErrCount := tm.cm.GetTunErrorCounter()
+
+					if currentErrCount <= 2 || successCounter >= 3 {
+						if successCounter >= 3 {
+							tm.cm.SetTunErrorCounter(0)
+						}
+
+						if tm.cm.GetLastState() != curr {
+							tm.UpdateIconByState(int(curr))
+							tm.cm.SetLastState(curr)
+						}
+					}
 				}
 			}
 		}
-		time.Sleep(1 * time.Second)
+		
+		// 优雅等待：利用通道阻塞，避免死循环爆 CPU
+		<-ticker.C
 	}
 }
 
@@ -794,6 +782,7 @@ func (tm *TrayManager) SniffAndSolidifyConfig() {
 	}
 }
 
+// 【保留吸收】：保留日志排查机制
 func (tm *TrayManager) ToggleAutoStart(enable bool) {
 	const taskName = "MihomoRunTask"
 	if key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE); err == nil {
@@ -823,12 +812,18 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil {
 			success = true
+			log.Println("[UI] AutoStart enabled successfully.")
+		} else {
+			log.Printf("[UI] Failed to enable AutoStart: %v\n", err)
 		}
 	} else {
 		cmd := exec.Command("schtasks", "/Delete", "/TN", "\\"+taskName, "/F")
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil || !tm.CheckAutoStartStatus() {
 			success = true
+			log.Println("[UI] AutoStart disabled successfully.")
+		} else {
+			log.Printf("[UI] Failed to disable AutoStart: %v\n", err)
 		}
 	}
 	if success {
