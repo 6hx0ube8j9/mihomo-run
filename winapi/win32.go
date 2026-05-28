@@ -11,7 +11,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// 定义接口，用于跨包调用，避免循环依赖
 type ConfigContextInterface interface {
 	CompareAndSwapFocusing(oldVal, newVal int32) bool
 	SetFocusing(val int32)
@@ -149,7 +148,6 @@ func FindAndFocusChromeWindow(mainPid uint32, cm ConfigContextInterface) bool {
 					SetCachedWebUIHwnd(hwnd)
 					return 0
 				}
-				// 检查窗口是否为 UI 页面
 				var titleBuf [512]uint16
 				_, _, _ = procGetWindowText.Call(hwnd, uintptr(unsafe.Pointer(&titleBuf[0])), 512)
 				wndTitle := strings.ToLower(windows.UTF16ToString(titleBuf[:]))
