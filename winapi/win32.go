@@ -11,6 +11,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// 定义接口，用于跨包调用，避免循环依赖
+type ConfigContextInterface interface {
+	CompareAndSwapFocusing(oldVal, newVal int32) bool
+	SetFocusing(val int32)
+}
+
 var (
 	u32       = windows.NewLazySystemDLL("user32.dll")
 	k32       = windows.NewLazySystemDLL("kernel32.dll")
@@ -19,22 +25,21 @@ var (
 )
 
 var (
-	procEnumWindows      = u32.NewProc("EnumWindows")
-	procGetClassName     = u32.NewProc("GetClassNameW")
-	procIsWindowVisible  = u32.NewProc("IsWindowVisible")
-	procGetWindowThread  = u32.NewProc("GetWindowThreadProcessId")
-	procGetWindow        = u32.NewProc("GetWindow")
-	procGetWindowText    = u32.NewProc("GetWindowTextW")
-	procSetWindowPos     = u32.NewProc("SetWindowPos")
-	procShowWindow       = u32.NewProc("ShowWindow")
-	procSetForeground    = u32.NewProc("SetForegroundWindow")
-	procBringToTop       = u32.NewProc("BringWindowToTop")
-	procGetForeground    = u32.NewProc("GetForegroundWindow")
-	procAttachThread     = u32.NewProc("AttachThreadInput")
-	procGetCurrentThread = k32.NewProc("GetCurrentThreadId")
-	procKeybdEvent       = u32.NewProc("keybd_event")
-	procGetSystemMetrics = u32.NewProc("GetSystemMetrics")
-	// 优化：提前加载 SwitchToThisWindow
+	procEnumWindows        = u32.NewProc("EnumWindows")
+	procGetClassName       = u32.NewProc("GetClassNameW")
+	procIsWindowVisible    = u32.NewProc("IsWindowVisible")
+	procGetWindowThread    = u32.NewProc("GetWindowThreadProcessId")
+	procGetWindow          = u32.NewProc("GetWindow")
+	procGetWindowText      = u32.NewProc("GetWindowTextW")
+	procSetWindowPos       = u32.NewProc("SetWindowPos")
+	procShowWindow         = u32.NewProc("ShowWindow")
+	procSetForeground      = u32.NewProc("SetForegroundWindow")
+	procBringToTop         = u32.NewProc("BringWindowToTop")
+	procGetForeground      = u32.NewProc("GetForegroundWindow")
+	procAttachThread       = u32.NewProc("AttachThreadInput")
+	procGetCurrentThread   = k32.NewProc("GetCurrentThreadId")
+	procKeybdEvent         = u32.NewProc("keybd_event")
+	procGetSystemMetrics   = u32.NewProc("GetSystemMetrics")
 	procSwitchToThisWindow = u32.NewProc("SwitchToThisWindow")
 )
 
@@ -57,9 +62,30 @@ func init() {
 	}
 }
 
-// ... (GetCachedWebUIHwnd, SetCachedWebUIHwnd, IsWindowVisible 等保持不变) ...
+func GetCachedWebUIHwnd() uintptr {
+	return cachedWebUIHwnd.Load()
+}
 
-func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
+func SetCachedWebUIHwnd(hwnd uintptr) {
+	cachedWebUIHwnd.Store(hwnd)
+}
+
+func IsWindowVisible(hwnd uintptr) bool {
+	vis, _, _ := procIsWindowVisible.Call(hwnd)
+	return vis != 0
+}
+
+func GetSystemMetrics(index int) int {
+	res, _, _ := procGetSystemMetrics.Call(uintptr(index))
+	return int(res)
+}
+
+func RefreshInternetOptions() {
+	_, _, _ = setOption.Call(0, 37, 0, 0)
+	_, _, _ = setOption.Call(0, 39, 0, 0)
+}
+
+func FocusWindowSilky(targetHwnd uintptr, cm ConfigContextInterface) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -73,7 +99,6 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	foreT, _, _ := procGetWindowThread.Call(foreH, 0)
 	targT, _, _ := procGetWindowThread.Call(targetHwnd, 0)
 
-	// 模拟 Alt 键按下，防止 Windows 阻止前台焦点切换
 	procKeybdEvent.Call(0x12, 0, 0, 0)
 
 	if foreT != currT && foreT != 0 {
@@ -84,13 +109,9 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	}
 
 	procShowWindow.Call(targetHwnd, SW_RESTORE)
-	
-	// 使用预加载的 procSwitchToThisWindow
-	_, _, _ = procSwitchToThisWindow.Call(targetHwnd, 1)
-
+	procSwitchToThisWindow.Call(targetHwnd, 1)
 	procSetForeground.Call(targetHwnd)
 	procBringToTop.Call(targetHwnd)
-
 	procSetWindowPos.Call(targetHwnd, uintptr(0xFFFFFFFFFFFFFFFF), 0, 0, 0, 0, SWP_SILKY)
 
 	if targT != 0 && targT != currT {
@@ -105,4 +126,46 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	time.AfterFunc(400*time.Millisecond, func() {
 		procSetWindowPos.Call(targetHwnd, uintptr(0xFFFFFFFFFFFFFFFE), 0, 0, 0, 0, SWP_SILKY)
 	})
+}
+
+func FindAndFocusChromeWindow(mainPid uint32, cm ConfigContextInterface) bool {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	var foundHwnd uintptr
+
+	procEnumWindows.Call(windows.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
+		if IsWindowVisible(hwnd) {
+			var wndPid uint32
+			_, _, _ = procGetWindowThread.Call(hwnd, uintptr(unsafe.Pointer(&wndPid)))
+
+			var buf [256]uint16
+			_, _, _ = procGetClassName.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), 256)
+			className := windows.UTF16ToString(buf[:])
+
+			if className == "Chrome_WidgetWin_1" {
+				if wndPid == mainPid {
+					foundHwnd = hwnd
+					SetCachedWebUIHwnd(hwnd)
+					return 0
+				}
+				// 检查窗口是否为 UI 页面
+				var titleBuf [512]uint16
+				_, _, _ = procGetWindowText.Call(hwnd, uintptr(unsafe.Pointer(&titleBuf[0])), 512)
+				wndTitle := strings.ToLower(windows.UTF16ToString(titleBuf[:]))
+				if strings.Contains(wndTitle, "ui") || strings.Contains(wndTitle, "dashboard") {
+					foundHwnd = hwnd
+					SetCachedWebUIHwnd(hwnd)
+					return 0
+				}
+			}
+		}
+		return 1
+	}), 0)
+
+	if foundHwnd != 0 {
+		FocusWindowSilky(foundHwnd, cm)
+		return true
+	}
+	return false
 }
