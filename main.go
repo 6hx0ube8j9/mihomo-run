@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +21,15 @@ import (
 
 const APP_MUTEX = "Mihomo_Unique_Mutex"
 
+func initLog(baseDir string) {
+	f, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return
+	}
+	log.SetOutput(f)
+	log.Println("=== Mihomo Run Started ===")
+}
+
 func main() {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -34,10 +44,11 @@ func main() {
 		if hM != 0 {
 			windows.CloseHandle(hM)
 		}
-		return
+		return // 程序已在运行，静默退出
 	}
 	defer windows.CloseHandle(hM)
 
+	// 2. 检查自启与 UAC 提权
 	isAutostart := false
 	for _, arg := range os.Args {
 		if arg == "---autostart" {
@@ -51,17 +62,22 @@ func main() {
 		return
 	}
 
-	configMgr := config.NewConfigManager(baseDir, exePath)
-	win32API := &sysproxy.Win32NotificationBridge{}
+	initLog(baseDir)
 
+	configMgr := config.NewConfigManager(baseDir, exePath)
+	log.Printf("[Main] Config initialized at: %s", baseDir)
+
+	win32API := &sysproxy.Win32NotificationBridge{}
 	proxyMgr := sysproxy.NewProxyManager(configMgr, win32API)
 
 	kernelHooks := kernel.KernelHooks{
 		OnKernelStarted: func() {
+			log.Println("[Main] Kernel started, sniffing config...")
 			trayTemp := ui.NewTrayManager(configMgr, nil, nil)
 			trayTemp.SniffAndSolidifyConfig()
 		},
 		OnKernelReady: func() {
+			log.Println("[Main] Kernel ready, syncing config and proxy...")
 			trayTemp := ui.NewTrayManager(configMgr, nil, proxyMgr)
 			trayTemp.SyncConfigToKernel()
 
@@ -82,19 +98,22 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
+		log.Println("[Main] Received interrupt signal, gracefully shutting down...")
 		systray.Quit()
 	}()
 
 	go func() {
-		time.Sleep(1 * time.Second)
+		time.Sleep(100 * time.Millisecond)
 		go kernelMgr.MonitorKernelDaemon()
 		go trayMgr.MonitorIconState()
 		go trayMgr.WatchTunState()
 	}()
 
 	systray.Run(trayMgr.SetupTrayUI, func() {
+		log.Println("[Main] Performing cleanup before exit...")
 		configMgr.MarkAsExiting()
-		client := &http.Client{Timeout: 200 * time.Millisecond}
+
+		client := &http.Client{Timeout: 500 * time.Millisecond}
 		apiURL := "http://127.0.0.1:52719/json"
 		if resp, err := client.Get(apiURL); err == nil {
 			var targets []map[string]interface{}
@@ -109,9 +128,11 @@ func main() {
 			}
 			resp.Body.Close()
 		}
+
 		proxyMgr.SetProxyRegistry(false)
 		systray.Quit()
 		time.Sleep(100 * time.Millisecond)
+		log.Println("[Main] Cleanup finished, goodbye!")
 	})
 }
 
