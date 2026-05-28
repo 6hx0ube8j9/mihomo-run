@@ -16,7 +16,6 @@ import (
 	"mihomo-run/kernel"
 	"mihomo-run/sysproxy"
 	"mihomo-run/ui"
-	"mihomo-run/winapi"
 )
 
 const APP_MUTEX = "Mihomo_Unique_Mutex"
