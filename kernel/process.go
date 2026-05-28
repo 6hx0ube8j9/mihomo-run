@@ -1,7 +1,7 @@
 package kernel
 
 import (
-	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -11,7 +11,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// 保持原有的接口定义，确保 main.go 不会报错
 type ConfigContextInterface interface {
 	BaseDir() string
 	IsReallyExiting() bool
@@ -25,7 +24,7 @@ type ConfigContextInterface interface {
 
 type KernelHooks struct {
 	OnKernelStarted func()
-	OnKernelReady   func() // 暂留，如果之前代码有用到
+	OnKernelReady   func()
 }
 
 type KernelManager struct {
@@ -41,17 +40,15 @@ func NewKernelManager(cm ConfigContextInterface, hooks KernelHooks) *KernelManag
 	}
 }
 
-// InitJobObject 初始化 Windows 作业对象 (极佳的实践，防止产生孤儿进程)
 func (km *KernelManager) InitJobObject() {
 	h, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
-		log.Printf("[Kernel] Failed to create Job Object: %v", err)
 		return
 	}
 
 	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
 		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
-			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, // 主进程死，子进程必死
+			LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 		},
 	}
 
@@ -61,50 +58,119 @@ func (km *KernelManager) InitJobObject() {
 		uintptr(unsafe.Pointer(&info)),
 		uint32(unsafe.Sizeof(info)),
 	)
-	if err == nil {
-		km.hJob = h
+	if err != nil {
+		windows.CloseHandle(h)
+		return
+	}
+	km.hJob = h
+}
+
+func (km *KernelManager) CloseJobObject() {
+	if km.hJob != 0 {
+		windows.CloseHandle(km.hJob)
+		km.hJob = 0
 	}
 }
 
-// MonitorKernelDaemon 核心优化：拥抱事件驱动，彻底告别盲目的 Sleep 轮询
-func (km *KernelManager) MonitorKernelDaemon() {
-	absBaseDir, _ := filepath.Abs(km.cm.BaseDir())
-	target := filepath.Join(absBaseDir, "mihomo.exe")
+func (km *KernelManager) IsProcessRunning(name string) bool {
+	h, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+
+	var pe windows.ProcessEntry32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	if err := windows.Process32First(h, &pe); err != nil {
+		return false
+	}
+
+	myPid := uint32(os.Getpid())
+	for {
+		if strings.EqualFold(windows.UTF16ToString(pe.ExeFile[:]), name) {
+			if pe.ProcessID != myPid {
+				return true
+			}
+		}
+		if err := windows.Process32Next(h, &pe); err != nil {
+			break
+		}
+	}
+	return false
+}
+
+func (km *KernelManager) KillProcessByName(name string) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(snapshot)
+
+	var pe windows.ProcessEntry32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+
+	if err := windows.Process32First(snapshot, &pe); err != nil {
+		return
+	}
 
 	for {
-		// 1. 检查是否正在退出
+		if strings.EqualFold(windows.UTF16ToString(pe.ExeFile[:]), name) {
+			pid := pe.ProcessID
+			if pid != uint32(os.Getpid()) {
+				h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_TERMINATE, false, pid)
+				if err == nil {
+					_ = windows.TerminateProcess(h, 9)
+					windows.CloseHandle(h)
+				}
+			}
+		}
+		if err := windows.Process32Next(snapshot, &pe); err != nil {
+			break
+		}
+	}
+}
+
+func (km *KernelManager) MonitorKernelDaemon() {
+	target := filepath.Join(km.cm.BaseDir(), "mihomo.exe")
+	absBaseDir, _ := filepath.Abs(km.cm.BaseDir())
+
+	for {
 		if km.cm.IsReallyExiting() {
 			return
 		}
 
-		// 2. 启动前，先大扫除，确保没有残留的僵尸进程占用端口
-		km.KillProcessByName("mihomo.exe")
-		time.Sleep(300 * time.Millisecond)
+		if km.IsProcessRunning("mihomo.exe") {
+			if km.cm.IsSystemInitializing() && !km.cm.IsSyncing() {
+				km.cm.SetSystemInitializing(false)
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
 
-		// 3. 准备启动内核
 		km.cm.SetSystemInitializing(true)
 		km.cm.SetHasFirstSynced(false)
 		km.cm.SetKernelActive(false)
+
+		km.KillProcessByName("mihomo.exe")
+		time.Sleep(300 * time.Millisecond)
 
 		cmd := exec.Command(target, "-d", ".")
 		cmd.Dir = absBaseDir
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 
-		// 4. 尝试启动
 		if err := cmd.Start(); err != nil {
-			log.Printf("[Kernel] Failed to start mihomo: %v", err)
-			time.Sleep(2 * time.Second) // 启动失败才等 2 秒重试
+			km.cm.SetKernelActive(false)
+			km.cm.SetHasFirstSynced(true)
+			km.cm.SetSystemInitializing(false)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		// 启动成功，更新状态并触发回调
 		km.cm.SetKernelActive(true)
-		log.Println("[Kernel] mihomo.exe started successfully.")
 		if km.hooks.OnKernelStarted != nil {
 			km.hooks.OnKernelStarted()
 		}
 
-		// 将进程绑定到 Job Object
 		if km.hJob != 0 {
 			hp, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
 			if err == nil {
@@ -113,55 +179,24 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			}
 		}
 
-		// 5. 核心魔法：使用 channel 接收进程退出的信号
-		processDone := make(chan error, 1)
 		go func() {
-			processDone <- cmd.Wait() // 阻塞直到进程自己死掉（OS级别事件，不耗CPU）
+			time.Sleep(1000 * time.Millisecond)
+			if km.cm.IsKernelActive() && km.hooks.OnKernelReady != nil {
+				km.hooks.OnKernelReady()
+			}
 		}()
 
-		// 6. 监听循环（0延迟响应）
-		ticker := time.NewTicker(500 * time.Millisecond)
-	WaitLoop:
-		for {
-			select {
-			case <-processDone:
-				// 事件A：内核进程崩溃或意外退出了！立刻跳出循环去重启
-				log.Println("[Kernel] mihomo.exe exited.")
-				break WaitLoop
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
 
-			case <-ticker.C:
-				// 事件B：定期检查前端是否下达了退出指令或需要更新初始化状态
-				if km.cm.IsReallyExiting() {
-					// 收到退出指令，主动杀掉进程，这会导致上面的 processDone 收到信号并清理
-					km.KillProcessByName("mihomo.exe")
-					ticker.Stop()
-					return
-				}
-
-				// 同步初始化状态（保留你原有的业务逻辑）
-				if km.cm.IsSystemInitializing() && !km.cm.IsSyncing() {
-					km.cm.SetSystemInitializing(false)
-				}
-			}
+		select {
+		case <-done:
+			km.cm.SetKernelActive(false)
+		case <-time.After(500 * time.Millisecond):
 		}
-		ticker.Stop()
-		km.cm.SetKernelActive(false)
 	}
 }
 
-// KillProcessByName 通过 taskkill 强制清理指定进程
-func (km *KernelManager) KillProcessByName(exeName string) {
-	cmd := exec.Command("taskkill", "/F", "/T", "/IM", exeName)
-	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
-	_ = cmd.Run()
-}
-
-func (km *KernelManager) IsProcessRunning(exeName string) bool {
-	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+exeName, "/NH")
-	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(out), exeName)
+func (km *KernelManager) kmIsProcessRunningActive(name string) bool {
+	return km.IsProcessRunning(name)
 }
