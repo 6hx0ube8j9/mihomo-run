@@ -33,7 +33,7 @@ type ConfigManager struct {
 	lastWrittenVersion           int32
 	lastState                    int32
 	tunErrorCounter              int32
-	atomicProxyState             int32 
+	atomicProxyState             int32
 	atomicTunState               int32
 	lastClickTime                int64
 }
@@ -43,7 +43,7 @@ func NewConfigManager(baseDir, exePath string) *ConfigManager {
 		baseDir:              baseDir,
 		exePath:              exePath,
 		configData:           make(map[string]string),
-		isSystemInitializing: 1, 
+		isSystemInitializing: 1,
 		lastState:            -1,
 	}
 }
@@ -87,7 +87,12 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		if b, marshalErr := json.Marshal(fileData); marshalErr == nil {
 			tmpPath := cfgPath + ".tmp"
 			if writeErr := os.WriteFile(tmpPath, b, 0644); writeErr == nil {
-				_ = os.Rename(tmpPath, cfgPath)
+				for i := 0; i < 3; i++ {
+					if renameErr := os.Rename(tmpPath, cfgPath); renameErr == nil {
+						break
+					}
+					time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
+				}
 			}
 		}
 	}
@@ -143,9 +148,14 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		}
 	}
 
-	b, err := json.Marshal(cm.configData)
-	cm.configMu.Unlock()
+	// 【优化吸收】：深拷贝，将昂贵的 json.Marshal 挪到锁的外面
+	dataCopy := make(map[string]string, len(cm.configData))
+	for k, v := range cm.configData {
+		dataCopy[k] = v
+	}
+	cm.configMu.Unlock() // 内存更新完毕，立刻解锁！极大提升并发性能
 
+	b, err := json.Marshal(dataCopy)
 	if err != nil {
 		return
 	}
@@ -172,13 +182,22 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 					break
 				}
 			}
-			if renameErr := os.Rename(tmpPath, cfgPath); renameErr != nil {
+
+			// 【优化吸收】：Windows 下防止杀毒软件占用的延时重试策略
+			var renameErr error
+			for i := 0; i < 3; i++ {
+				renameErr = os.Rename(tmpPath, cfgPath)
+				if renameErr == nil {
+					break
+				}
+				time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
+			}
+			if renameErr != nil {
 				_ = os.Remove(tmpPath)
 			}
 		}
 	}(b, myVersion)
 }
-
 
 func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
 func (cm *ConfigManager) ExePath() string { return cm.exePath }
