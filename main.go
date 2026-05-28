@@ -22,15 +22,13 @@ import (
 const APP_MUTEX = "Mihomo_Unique_Mutex"
 
 func initLog() {
-	// 创建或追加到 debug.log
-	f, err := os.OpenFile("debug.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		return
-	}
-	log.SetOutput(f)
-	log.Println("========================================")
-	log.Println("程序已启动: " + time.Now().Format("2006-01-02 15:04:05"))
-	log.Println("========================================")
+    // 强制写到 C 盘根目录，确保不是当前目录权限问题
+    f, err := os.OpenFile("C:\\mihomo_debug.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+    if err != nil {
+        return
+    }
+    log.SetOutput(f)
+    log.Println("--- 程序已启动 ---")
 }
 
 func main() {
