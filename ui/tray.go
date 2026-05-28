@@ -91,6 +91,7 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 
 	resp, err := tm.httpClient.Do(req)
 	if err != nil {
+		log.Println("[DEBUG] Mihomo process not found")
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -123,6 +124,7 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 
 func (tm *TrayManager) CheckSystemState() int32 {
 	if !tm.km.IsProcessRunning("mihomo.exe") {
+		log.Println("[DEBUG] Mihomo process not found")
 		return 0
 	}
 	body, err := tm.DoAPIRequest("GET", "/configs", nil)
