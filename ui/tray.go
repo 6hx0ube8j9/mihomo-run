@@ -35,7 +35,6 @@ const debugPort = "52719"
 
 var tunKeywords = []string{"mihomo", "meta", "clash", "sing-box", "wintun"}
 
-// TrayManager 負責托盤 UI 的佈局、事件綁定與背景定時重新整理工作
 type TrayManager struct {
 	cm         *config.ConfigManager
 	km         *kernel.KernelManager
@@ -45,7 +44,6 @@ type TrayManager struct {
 	mTun       *systray.MenuItem
 }
 
-// NewTrayManager 初始化托盤 UI 管理器
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
 	return &TrayManager{
 		cm:         cm,
@@ -58,11 +56,6 @@ func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysp
 	}
 }
 
-// ==========================================
-// 背景狀態機核心定時器 (消抖、防卡死、防 Socket 洩漏)
-// ==========================================
-
-// DoAPIRequest 封裝與 Mihomo 內核通訊的 REST API 請求，完美維護內存緩衝池
 func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([]byte, error) {
 	apiAddr := strings.TrimSuffix(tm.cm.GetJsonConfig("external-controller"), "/")
 	if apiAddr == "" {
@@ -136,18 +129,16 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	return body, nil
 }
 
-// CheckSystemState 負責向內核拉取實時數據並與本地預期狀態對齊
 func (tm *TrayManager) CheckSystemState() int32 {
 	if !tm.km.IsProcessRunning("mihomo.exe") {
-		return 0 // StateStop
+		return 0
 	}
 	body, err := tm.DoAPIRequest("GET", "/configs", nil)
 	if err != nil {
-		// 🌟 核心優化：如果系統正處於初始化/重載空窗期，API 逾時不應誤判為內核停止，返回上一次成功狀態
 		if tm.cm.IsSystemInitializing() {
 			return tm.cm.GetLastState()
 		}
-		return 0 // StateStop
+		return 0
 	}
 
 	var currentConf struct {
@@ -157,7 +148,7 @@ func (tm *TrayManager) CheckSystemState() int32 {
 		Mode string `json:"mode"`
 	}
 	if err := json.Unmarshal(body, &currentConf); err != nil {
-		return 0 // StateStop
+		return 0
 	}
 
 	targetTunInJson := tm.cm.GetTunState()
@@ -197,15 +188,14 @@ func (tm *TrayManager) CheckSystemState() int32 {
 	}
 
 	if isTunActive {
-		return 2 // StateTun
+		return 2
 	}
 	if targetProxyInJson {
-		return 3 // StateProxy
+		return 3
 	}
-	return 4 // StateDefault
+	return 4
 }
 
-// MonitorIconState 獨立後台 Goroutine，定時重新整理托盤圖標並提供故障消抖
 func (tm *TrayManager) MonitorIconState() {
 	var successCounter int
 
@@ -219,7 +209,7 @@ func (tm *TrayManager) MonitorIconState() {
 			successCounter = 0
 
 			if tm.cm.GetLastState() != 0 {
-				tm.UpdateIconByState(0) // StateStop
+				tm.UpdateIconByState(0)
 				tm.cm.SetLastState(0)
 			}
 		} else {
@@ -238,9 +228,9 @@ func (tm *TrayManager) MonitorIconState() {
 				}
 
 				if tm.cm.GetTunErrorCounter() > 2 {
-					targetState := int32(1) // StateError
+					targetState := int32(1)
 					if curr == 0 {
-						targetState = 0 // StateStop
+						targetState = 0
 					}
 
 					if tm.cm.GetLastState() != targetState {
@@ -276,7 +266,6 @@ func (tm *TrayManager) MonitorIconState() {
 	}
 }
 
-// WatchTunState 定時監控 Windows 物理虛擬網卡是否存在
 func (tm *TrayManager) WatchTunState() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -337,11 +326,6 @@ func (tm *TrayManager) WatchTunState() {
 	}
 }
 
-// ==========================================
-// 外部命令與組態重載 (消抖與安全優化)
-// ==========================================
-
-// ReloadConfigFile 控制前端發起配置重載，並在背景協程中進行安全的狀態對齊
 func (tm *TrayManager) ReloadConfigFile() {
 	tm.cm.SetSystemInitializing(true)
 	isProxyEnabled := tm.cm.GetProxyState()
@@ -353,7 +337,6 @@ func (tm *TrayManager) ReloadConfigFile() {
 
 	_, _ = tm.DoAPIRequest("PUT", "/configs?force=true", nil)
 
-	// 🛠️ 【消抖優化】將重載後的阻塞緩衝與狀態修復完全放入獨立協程，防止阻塞 UI 執行緒
 	go func() {
 		defer tm.cm.SetSystemInitializing(false)
 		time.Sleep(200 * time.Millisecond)
@@ -372,7 +355,6 @@ func (tm *TrayManager) ReloadConfigFile() {
 	}()
 }
 
-// SyncConfigToKernel 發起 REST API 的 PATCH 請求，將本地期望狀態同步給內核
 func (tm *TrayManager) SyncConfigToKernel() {
 	if !tm.cm.CompareAndSwapSyncing(0, 1) {
 		return
@@ -400,7 +382,6 @@ func (tm *TrayManager) SyncConfigToKernel() {
 	}
 }
 
-// LaunchWebUI 控制 Chrome/Edge 核心瀏覽器以擴展 App 模式強制居中拉起，並根治通訊埠洩漏
 func (tm *TrayManager) LaunchWebUI() {
 	apiAddr := tm.cm.GetJsonConfig("external-controller")
 	secret := tm.cm.GetJsonConfig("secret")
@@ -415,7 +396,6 @@ func (tm *TrayManager) LaunchWebUI() {
 	}
 	finalURL := fmt.Sprintf("%s/ui/?hostname=%s&port=%s&secret=%s#/proxies", baseUI, host, port, secret)
 
-	// A. 如果快取中已有網頁視窗，安全讀取並置頂
 	if hwnd := winapi.GetCachedWebUIHwnd(); hwnd != 0 {
 		if winapi.IsWindowVisible(hwnd) {
 			winapi.FocusWindowSilky(hwnd, tm.cm)
@@ -427,7 +407,6 @@ func (tm *TrayManager) LaunchWebUI() {
 	client := &http.Client{Timeout: 300 * time.Millisecond}
 	isPortOccupied := false
 
-	// B. 探測 CDP 偵錯通訊埠
 	if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json", debugPort)); err == nil {
 		isPortOccupied = true
 		defer resp.Body.Close()
@@ -437,13 +416,11 @@ func (tm *TrayManager) LaunchWebUI() {
 				pURL, _ := t["url"].(string)
 				if strings.Contains(pURL, "/ui/") || strings.Contains(pURL, "setup") {
 					id, _ := t["id"].(string)
-					
-					// 激活標籤頁
+
 					if actResp, actErr := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json/activate/%s", debugPort, id)); actErr == nil {
 						_ = actResp.Body.Close()
 					}
 
-					// 🛠️ 【核心優化】非同步尋找並置頂已存在的 Chrome 視窗，傳遞配置中心鎖介面
 					go func() {
 						for i := 0; i < 20; i++ {
 							if winapi.FindAndFocusChromeWindow(0, tm.cm) {
@@ -464,14 +441,12 @@ func (tm *TrayManager) LaunchWebUI() {
 		}
 	}
 
-	// C. 若偵錯通訊埠卡死但被佔用，暴力執行強殺釋放
 	if isPortOccupied {
 		killCmd := "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :" + debugPort + " ^| findstr LISTENING') do taskkill /F /PID %%a"
 		_ = exec.Command("cmd", "/c", killCmd).Run()
 		time.Sleep(150 * time.Millisecond)
 	}
 
-	// D. 尋找系統中可用的現代瀏覽器路徑
 	var browserPath string
 	potentialPaths := []string{
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Microsoft\Edge\Application\msedge.exe`),
@@ -493,8 +468,8 @@ func (tm *TrayManager) LaunchWebUI() {
 		userDataDir := filepath.Join(tm.cm.BaseDir(), "webcache")
 		_ = os.MkdirAll(userDataDir, 0755)
 
-		scrW := winapi.GetSystemMetrics(0) // SM_CXSCREEN
-		scrH := winapi.GetSystemMetrics(1) // SM_CYSCREEN
+		scrW := winapi.GetSystemMetrics(0)
+		scrH := winapi.GetSystemMetrics(1)
 
 		winW, winH := 1280, 768
 		if scrW > 0 && scrH > 0 {
@@ -508,7 +483,9 @@ func (tm *TrayManager) LaunchWebUI() {
 			case aspectRatio <= 1.05:
 				winW = int(w * 0.85)
 				winH = int(h * 0.65)
-				if winW < 800 { winW = 800 }
+				if winW < 800 {
+					winW = 800
+				}
 			case scrW >= 2560:
 				winW, winH = 1600, 960
 			case scrW >= 1920:
@@ -522,8 +499,12 @@ func (tm *TrayManager) LaunchWebUI() {
 			case scrW <= 1280:
 				winW = int(w * 0.92)
 				winH = int(h * 0.88)
-				if winW < 960 { winW = 960 }
-				if winH < 580 { winH = 580 }
+				if winW < 960 {
+					winW = 960
+				}
+				if winH < 580 {
+					winH = 580
+				}
 			default:
 				winW = int(w * 0.75)
 				winH = int(h * 0.75)
@@ -532,8 +513,12 @@ func (tm *TrayManager) LaunchWebUI() {
 
 		winX := (scrW - winW) / 2
 		winY := (scrH - winH) / 2
-		if winX < 0 { winX = 0 }
-		if winY < 0 { winY = 0 }
+		if winX < 0 {
+			winX = 0
+		}
+		if winY < 0 {
+			winY = 0
+		}
 
 		args := []string{
 			"--app=" + finalURL,
@@ -549,7 +534,6 @@ func (tm *TrayManager) LaunchWebUI() {
 		if err := cmd.Start(); err == nil {
 			mainPid := uint32(cmd.Process.Pid)
 
-			// 🛠️ 【核心修復】巡迴內部激活時，對次級 HTTP 請求做 Body 讀空與關閉保護，防止臨時通訊埠枯竭
 			go func() {
 				for i := 0; i < 20; i++ {
 					if winapi.FindAndFocusChromeWindow(mainPid, tm.cm) {
@@ -564,11 +548,6 @@ func (tm *TrayManager) LaunchWebUI() {
 	}
 }
 
-// ==========================================
-// 托盤選單與組裝佈局
-// ==========================================
-
-// SetupTrayUI 綁定選單事件並組裝整個 UI 佈局 (完成原 main 的回呼註冊)
 func (tm *TrayManager) SetupTrayUI() {
 	tm.cm.SetSystemInitializing(true)
 
@@ -581,9 +560,8 @@ func (tm *TrayManager) SetupTrayUI() {
 	initModeChecked := tm.cm.GetCurrentModeState()
 
 	tm.pm.SetProxyRegistry(initProxyChecked)
-	tm.UpdateIconByState(0) // StateStop
+	tm.UpdateIconByState(0)
 
-	// 1. 滑鼠左鍵點擊截流事件
 	systray.SetOnClick(func(menu systray.IMenu) {
 		if tm.cm.IsSystemInitializing() {
 			return
@@ -594,8 +572,7 @@ func (tm *TrayManager) SetupTrayUI() {
 		go tm.LaunchWebUI()
 	})
 
-	// 2. 選單：進入 Web 面板
-	mWeb := systray.AddMenuItem("進入 Web 面板", "")
+	mWeb := systray.AddMenuItem("进入 Web 面板", "")
 	mWeb.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(1000 * time.Millisecond)) {
 			return
@@ -605,55 +582,66 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	systray.AddSeparator()
 
-	// 3. 選單：系統代理
-	mProxy := systray.AddMenuItemCheckbox("系統代理", "", initProxyChecked)
+	mProxy := systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
 	mProxy.Click(func() {
 		next := !mProxy.Checked()
 		tm.pm.SetProxyRegistry(next)
-		if next { mProxy.Check() } else { mProxy.Uncheck() }
+		if next {
+			mProxy.Check()
+		} else {
+			mProxy.Uncheck()
+		}
 	})
 
-	// 4. 選單：虛擬網卡 (TUN)
-	tm.mTun = systray.AddMenuItemCheckbox("虛擬網卡 (TUN)", "", initTunChecked)
+	tm.mTun = systray.AddMenuItemCheckbox("虚拟网卡 (TUN)", "", initTunChecked)
 	tm.mTun.Click(func() {
 		next := !tm.mTun.Checked()
-		if next { tm.mTun.Check() } else { tm.mTun.Uncheck() }
+		if next {
+			tm.mTun.Check()
+		} else {
+			tm.mTun.Uncheck()
+		}
 		go tm.SetTunMode(next)
 	})
 
 	systray.AddSeparator()
 
-	// 5. 選單：模式切換
-	mModeRoot := systray.AddMenuItem("模式切換", "")
+	mModeRoot := systray.AddMenuItem("模式切换", "")
 	modeMenus := make(map[string]*systray.MenuItem)
 	setupMode := func(key, label string) {
 		modeMenus[key] = mModeRoot.AddSubMenuItemCheckbox(label, "", initModeChecked == key)
 		modeMenus[key].Click(func() {
 			for k, menu := range modeMenus {
-				if k == key { menu.Check() } else { menu.Uncheck() }
+				if k == key {
+					menu.Check()
+				} else {
+					menu.Uncheck()
+				}
 			}
 			go tm.SetMihomoMode(key)
 		})
 	}
-	setupMode("rule", "規則模式")
+	setupMode("rule", "规则模式")
 	setupMode("global", "全局模式")
-	setupMode("direct", "直連模式")
+	setupMode("direct", "直连模式")
 
 	systray.AddSeparator()
 
-	// 6. 選單：開啟目錄
-	mDir := systray.AddMenuItem("打開目錄", "")
+	mDir := systray.AddMenuItem("打开目录", "")
 	mDir.Click(func() {
 		windows.ShellExecute(0, nil, windows.StringToUTF16Ptr(tm.cm.BaseDir()), nil, nil, windows.SW_SHOWNORMAL)
 	})
 
-	// 7. 選單：更多功能
 	mMoreRoot := systray.AddMenuItem("更多", "")
-	mAuto := mMoreRoot.AddSubMenuItemCheckbox("開機自啟動", "", tm.CheckAutoStartStatus())
+	mAuto := mMoreRoot.AddSubMenuItemCheckbox("开机自启动", "", tm.CheckAutoStartStatus())
 	mAuto.Click(func() {
 		next := !mAuto.Checked()
 		tm.ToggleAutoStart(next)
-		if next { mAuto.Check() } else { mAuto.Uncheck() }
+		if next {
+			mAuto.Check()
+		} else {
+			mAuto.Uncheck()
+		}
 	})
 
 	mRestart := mMoreRoot.AddSubMenuItem("重启内核", "")
@@ -680,17 +668,12 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	systray.AddSeparator()
 
-	// 8. 選單：完全退出
 	mExit := systray.AddMenuItem("退出程序", "")
 	mExit.Click(func() {
 		tm.cm.MarkAsExiting()
 		systray.Quit()
 	})
 }
-
-// ==========================================
-// 輔助工具方法
-// ==========================================
 
 func (tm *TrayManager) SetMihomoMode(mode string) {
 	tm.cm.SaveJsonConfig("mode", mode)
@@ -814,7 +797,6 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 	}
 	success := false
 	if enable {
-		// 🛠️ 【核心修復】對排程任務參數路徑中的單引號進行徹底轉義，根治非標 Windows 用戶名引發的腳本中斷故障
 		safeExePath := strings.ReplaceAll(tm.cm.ExePath(), "'", "''")
 		safeBaseDir := strings.ReplaceAll(tm.cm.BaseDir(), "'", "''")
 
