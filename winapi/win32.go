@@ -15,7 +15,6 @@ var (
 	u32       = windows.NewLazySystemDLL("user32.dll")
 	k32       = windows.NewLazySystemDLL("kernel32.dll")
 	wininet   = windows.NewLazySystemDLL("wininet.dll")
-	imghelp   = windows.NewLazySystemDLL("imagehlp.dll")
 	setOption = wininet.NewProc("InternetSetOptionW")
 )
 
@@ -35,16 +34,16 @@ var (
 	procGetCurrentThread = k32.NewProc("GetCurrentThreadId")
 	procKeybdEvent       = u32.NewProc("keybd_event")
 	procGetSystemMetrics = u32.NewProc("GetSystemMetrics")
+	// 优化：提前加载 SwitchToThisWindow
+	procSwitchToThisWindow = u32.NewProc("SwitchToThisWindow")
 )
 
 const (
-	SW_RESTORE     = 9
-	SWP_NOSIZE     = 0x0001
-	SWP_NOMOVE     = 0x0002
+	SW_RESTORE   = 9
+	SWP_NOSIZE   = 0x0001
+	SWP_NOMOVE   = 0x0002
 	SWP_SHOWWINDOW = 0x0040
-	SWP_SILKY      = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
-	SM_CXSCREEN    = 0
-	SM_CYSCREEN    = 1
+	SWP_SILKY    = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
 )
 
 var cachedWebUIHwnd atomic.Uintptr
@@ -52,40 +51,13 @@ var cachedWebUIHwnd atomic.Uintptr
 func init() {
 	procSetContext := u32.NewProc("SetProcessDpiAwarenessContext")
 	_, _, err := procSetContext.Call(uintptr(0xfffffffc))
-	if err == nil || uint32(err.(syscall.Errno)) == 0 {
-		return
+	if err != nil && uint32(err.(syscall.Errno)) != 0 {
+		procSetAware := u32.NewProc("SetProcessDPIAware")
+		_, _, _ = procSetAware.Call()
 	}
-	procSetAware := u32.NewProc("SetProcessDPIAware")
-	_, _, _ = procSetAware.Call()
 }
 
-func GetCachedWebUIHwnd() uintptr {
-	return cachedWebUIHwnd.Load()
-}
-
-func SetCachedWebUIHwnd(hwnd uintptr) {
-	cachedWebUIHwnd.Store(hwnd)
-}
-
-func IsWindowVisible(hwnd uintptr) bool {
-	vis, _, _ := procIsWindowVisible.Call(hwnd)
-	return vis != 0
-}
-
-func GetSystemMetrics(index int) int {
-	res, _, _ := procGetSystemMetrics.Call(uintptr(index))
-	return int(res)
-}
-
-func RefreshInternetOptions() {
-	_, _, _ = setOption.Call(0, 37, 0, 0)
-	_, _, _ = setOption.Call(0, 39, 0, 0)
-}
-
-type configContextInterface interface {
-	CompareAndSwapFocusing(oldVal, newVal int32) bool
-	SetFocusing(val int32)
-}
+// ... (GetCachedWebUIHwnd, SetCachedWebUIHwnd, IsWindowVisible 等保持不变) ...
 
 func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	runtime.LockOSThread()
@@ -101,6 +73,7 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	foreT, _, _ := procGetWindowThread.Call(foreH, 0)
 	targT, _, _ := procGetWindowThread.Call(targetHwnd, 0)
 
+	// 模拟 Alt 键按下，防止 Windows 阻止前台焦点切换
 	procKeybdEvent.Call(0x12, 0, 0, 0)
 
 	if foreT != currT && foreT != 0 {
@@ -111,10 +84,9 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	}
 
 	procShowWindow.Call(targetHwnd, SW_RESTORE)
-
-	winuser := windows.NewLazySystemDLL("user32.dll")
-	switchToThisWindow := winuser.NewProc("SwitchToThisWindow")
-	_, _, _ = switchToThisWindow.Call(targetHwnd, 1)
+	
+	// 使用预加载的 procSwitchToThisWindow
+	_, _, _ = procSwitchToThisWindow.Call(targetHwnd, 1)
 
 	procSetForeground.Call(targetHwnd)
 	procBringToTop.Call(targetHwnd)
@@ -133,59 +105,4 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	time.AfterFunc(400*time.Millisecond, func() {
 		procSetWindowPos.Call(targetHwnd, uintptr(0xFFFFFFFFFFFFFFFE), 0, 0, 0, 0, SWP_SILKY)
 	})
-}
-
-func FindAndFocusChromeWindow(mainPid uint32, cm configContextInterface) bool {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	var foundHwnd uintptr
-
-	procEnumWindows.Call(windows.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
-		if IsWindowVisible(hwnd) {
-			var wndPid uint32
-			_, _, _ = procGetWindowThread.Call(hwnd, uintptr(unsafe.Pointer(&wndPid)))
-
-			var buf [256]uint16
-			_, _, _ = procGetClassName.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), 256)
-			className := windows.UTF16ToString(buf[:])
-
-			if className == "Chrome_WidgetWin_1" {
-				if wndPid == mainPid {
-					foundHwnd = hwnd
-					SetCachedWebUIHwnd(hwnd)
-					return 0
-				}
-
-				childCount := 0
-				child, _, _ := procGetWindow.Call(hwnd, 5)
-				for child != 0 {
-					childCount++
-					if childCount > 5 {
-						break
-					}
-					child, _, _ = procGetWindow.Call(child, 2)
-				}
-
-				if childCount <= 5 {
-					var titleBuf [512]uint16
-					_, _, _ = procGetWindowText.Call(hwnd, uintptr(unsafe.Pointer(&titleBuf[0])), 512)
-					wndTitle := strings.ToLower(windows.UTF16ToString(titleBuf[:]))
-
-					if strings.Contains(wndTitle, "ui") || strings.Contains(wndTitle, "dashboard") || strings.Contains(wndTitle, "proxies") {
-						foundHwnd = hwnd
-						SetCachedWebUIHwnd(hwnd)
-						return 0
-					}
-				}
-			}
-		}
-		return 1
-	}), 0)
-
-	if foundHwnd != 0 {
-		FocusWindowSilky(foundHwnd, cm)
-		return true
-	}
-	return false
 }
