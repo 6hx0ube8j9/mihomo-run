@@ -16,16 +16,13 @@ type ConfigManager struct {
 	baseDir string
 	exePath string
 
-	// 锁只保护内存数据，不再包含 IO 操作
-	configMu         sync.RWMutex
-	configData       map[string]string
-	
-	// 针对字符串或非并发安全状态的独立锁
-	modeMu           sync.RWMutex
-	currentModeState string
-	lastAppliedProxy bool
+	configMu   sync.RWMutex
+	configData map[string]string
 
-	// 原子操作状态机变量
+	modeMu             sync.RWMutex
+	currentModeState   string
+	lastAppliedProxy   bool
+
 	isSystemInitializing         int32
 	isSyncing                    int32
 	globalOpID                   int32
@@ -55,7 +52,6 @@ func NewConfigManager(baseDir, exePath string) *ConfigManager {
 	return cm
 }
 
-// 内部方法：初始化时加载本地配置
 func (cm *ConfigManager) loadFromFile() {
 	targetPath := filepath.Join(cm.baseDir, CONFIG_FILE)
 	bytes, err := os.ReadFile(targetPath)
@@ -66,72 +62,60 @@ func (cm *ConfigManager) loadFromFile() {
 	}
 }
 
-// ==========================================
-// 核心优化：I/O 与防占用重试
-// ==========================================
-
 func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
 func (cm *ConfigManager) ExePath() string { return cm.exePath }
 
-// GetJsonConfig 获取配置 (纯内存操作，极快)
 func (cm *ConfigManager) GetJsonConfig(key string) string {
 	cm.configMu.RLock()
 	defer cm.configMu.RUnlock()
 	return cm.configData[key]
 }
 
-// SaveJsonConfig 保存配置 (剥离 I/O 阻塞)
 func (cm *ConfigManager) SaveJsonConfig(key, value string) {
-	// 1. 加写锁，仅更新内存并进行深拷贝
 	cm.configMu.Lock()
 	if cm.configData[key] == value {
 		cm.configMu.Unlock()
-		return // 值未改变，直接返回，避免无意义的 IO
+		return
 	}
 	cm.configData[key] = value
 
-	// 拷贝一份数据用于序列化，让锁尽快释放
 	dataCopy := make(map[string]string, len(cm.configData))
 	for k, v := range cm.configData {
 		dataCopy[k] = v
 	}
 	cm.configMu.Unlock()
 
-	// 2. 在锁外异步执行耗时的 I/O 操作
-	go cm.syncToFile(dataCopy)
+	version := atomic.AddInt32(&cm.configVersion, 1)
+	go cm.syncToFile(dataCopy, version)
 }
 
-// syncToFile 负责将配置安全地写入磁盘
-func (cm *ConfigManager) syncToFile(data map[string]string) {
+func (cm *ConfigManager) syncToFile(data map[string]string, version int32) {
+	if version <= atomic.LoadInt32(&cm.lastWrittenVersion) {
+		return
+	}
+
 	bytes, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[Config] Failed to marshal config: %v\n", err)
 		return
 	}
 
 	targetPath := filepath.Join(cm.baseDir, CONFIG_FILE)
 	tmpPath := targetPath + ".tmp"
 
-	// 写入临时文件
 	if err := os.WriteFile(tmpPath, bytes, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "[Config] Failed to write temp file: %v\n", err)
 		return
 	}
 
-	// 核心修复：Windows 环境下原子替换的防碰撞重试机制
-	var renameErr error
 	for i := 0; i < 3; i++ {
-		renameErr = os.Rename(tmpPath, targetPath)
-		if renameErr == nil {
-			return // 成功写入
+		if err := os.Rename(tmpPath, targetPath); err == nil {
+			atomic.StoreInt32(&cm.lastWrittenVersion, version)
+			return
 		}
-		// 遇到杀毒软件短暂占用，睡眠后重试
 		time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
 	}
-	fmt.Fprintf(os.Stderr, "[Config] CRITICAL: Failed to rename config file after retries: %v\n", renameErr)
+	_ = os.Remove(tmpPath)
 }
 
-// EnsureDefaultConfig 确保关键配置不为空
 func (cm *ConfigManager) EnsureDefaultConfig() {
 	if cm.GetJsonConfig("port") == "" {
 		cm.SaveJsonConfig("port", "7890")
@@ -143,10 +127,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		cm.SaveJsonConfig("mode", "rule")
 	}
 }
-
-// ==========================================
-// 状态机与原子操作 (供其他组件安全调用)
-// ==========================================
 
 func (cm *ConfigManager) IsSystemInitializing() bool {
 	return atomic.LoadInt32(&cm.isSystemInitializing) == 1
@@ -168,7 +148,6 @@ func (cm *ConfigManager) SetSyncing(val bool) {
 	atomic.StoreInt32(&cm.isSyncing, i)
 }
 
-// CompareAndSwapSyncing 用于确保同一时刻只有一个同步任务执行
 func (cm *ConfigManager) CompareAndSwapSyncing(old, new int32) bool {
 	return atomic.CompareAndSwapInt32(&cm.isSyncing, old, new)
 }
