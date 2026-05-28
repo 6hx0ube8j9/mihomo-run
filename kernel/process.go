@@ -156,8 +156,7 @@ func (km *KernelManager) KillProcessByName(exeName string) {
 	_ = cmd.Run()
 }
 
-// kmIsProcessRunningActive 检查进程是否存活
-func (km *KernelManager) kmIsProcessRunningActive(exeName string) bool {
+func (km *KernelManager) IsProcessRunning(exeName string) bool {
 	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+exeName, "/NH")
 	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	out, err := cmd.Output()
