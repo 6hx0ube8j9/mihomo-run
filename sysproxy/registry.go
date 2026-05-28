@@ -44,7 +44,7 @@ func NewProxyManager(cm ConfigInterface, win Win32APIInterface) *ProxyManager {
 
 // SetProxyRegistry 核心优化：增加严格的错误处理、日志输出与状态一致性校验
 func (pm *ProxyManager) SetProxyRegistry(enable bool) {
-	// 1. 避免无意义的重复设置
+	log.Printf("[DEBUG] Setting proxy to: %v", enable)
 	if pm.cm.GetLastAppliedProxy() == enable {
 		return
 	}
