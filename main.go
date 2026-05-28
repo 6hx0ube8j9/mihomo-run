@@ -52,13 +52,30 @@ func main() {
 	}
 
 	configMgr := config.NewConfigManager(baseDir, exePath)
+	win32API := &sysproxy.Win32NotificationBridge{}
+
+	proxyMgr := sysproxy.NewProxyManager(configMgr, win32API)
+
 	kernelHooks := kernel.KernelHooks{
-		OnKernelStarted: func() {},
+		OnKernelStarted: func() {
+			trayTemp := ui.NewTrayManager(configMgr, nil, nil)
+			trayTemp.SniffAndSolidifyConfig()
+		},
+		OnKernelReady: func() {
+			trayTemp := ui.NewTrayManager(configMgr, nil, proxyMgr)
+			trayTemp.SyncConfigToKernel()
+
+			if configMgr.GetJsonConfig("proxy") == "true" {
+				configMgr.SetLastAppliedProxy(false)
+				proxyMgr.SetProxyRegistry(true)
+			}
+		},
 	}
+
 	kernelMgr := kernel.NewKernelManager(configMgr, kernelHooks)
 	kernelMgr.InitJobObject()
+	defer kernelMgr.CloseJobObject()
 
-	proxyMgr := sysproxy.NewProxyManager(configMgr, nil)
 	trayMgr := ui.NewTrayManager(configMgr, kernelMgr, proxyMgr)
 
 	go func() {
@@ -69,7 +86,7 @@ func main() {
 	}()
 
 	go func() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 		go kernelMgr.MonitorKernelDaemon()
 		go trayMgr.MonitorIconState()
 		go trayMgr.WatchTunState()
@@ -77,21 +94,23 @@ func main() {
 
 	systray.Run(trayMgr.SetupTrayUI, func() {
 		configMgr.MarkAsExiting()
-
-		client := &http.Client{Timeout: 500 * time.Millisecond}
-		if resp, err := client.Get("http://127.0.0.1:52719/json"); err == nil {
+		client := &http.Client{Timeout: 200 * time.Millisecond}
+		apiURL := "http://127.0.0.1:52719/json"
+		if resp, err := client.Get(apiURL); err == nil {
 			var targets []map[string]interface{}
 			if json.NewDecoder(resp.Body).Decode(&targets) == nil {
 				for _, t := range targets {
 					if id, ok := t["id"].(string); ok {
-						_, _ = client.Get("http://127.0.0.1:52719/json/close/" + id)
+						if closeResp, closeErr := client.Get("http://127.0.0.1:52719/json/close/" + id); closeErr == nil {
+							_ = closeResp.Body.Close()
+						}
 					}
 				}
 			}
 			resp.Body.Close()
 		}
-
 		proxyMgr.SetProxyRegistry(false)
+		systray.Quit()
 		time.Sleep(100 * time.Millisecond)
 	})
 }
