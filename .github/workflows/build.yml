@@ -15,20 +15,20 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22' 
-          
+          go-version: '1.22'
+          cache: true
+
       - name: Install dependencies
         shell: pwsh
         run: go mod tidy
 
-      - name: Install and Run rsrc (Resource Compiler)
+      - name: Install and Run rsrc
         shell: pwsh
         run: |
           go install github.com/akavel/rsrc@latest
           
           $gobin = (go env GOPATH) + "\bin"
           $rsrcPath = Join-Path $gobin "rsrc.exe"
-          
           $icoPath = "ui/icons/app.ico"
           
           if (Test-Path $icoPath) {
