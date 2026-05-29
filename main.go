@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +20,16 @@ import (
 )
 
 const APP_MUTEX = "Mihomo_Unique_Mutex"
+const logPath = "mihomo-run.log"
+
+func initLog(baseDir string) {
+	f, err := os.OpenFile(filepath.Join(baseDir, logPath), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return
+	}
+	log.SetOutput(f)
+	log.Println("=== Mihomo Run Started ===")
+}
 
 func main() {
 	exePath, err := os.Executable()
@@ -34,10 +45,11 @@ func main() {
 		if hM != 0 {
 			windows.CloseHandle(hM)
 		}
-		return
+		return // 程序已在运行，静默退出
 	}
 	defer windows.CloseHandle(hM)
 
+	// 1. 检查自启与 UAC 提权
 	isAutostart := false
 	for _, arg := range os.Args {
 		if arg == "---autostart" {
@@ -51,17 +63,22 @@ func main() {
 		return
 	}
 
+	// 2. 初始化日志与核心组件
+	initLog(baseDir)
 	configMgr := config.NewConfigManager(baseDir, exePath)
-	win32API := &sysproxy.Win32NotificationBridge{}
+	log.Printf("[Main] Config initialized at: %s", baseDir)
 
+	win32API := &sysproxy.Win32NotificationBridge{}
 	proxyMgr := sysproxy.NewProxyManager(configMgr, win32API)
 
 	kernelHooks := kernel.KernelHooks{
 		OnKernelStarted: func() {
+			log.Println("[Main] Kernel started, sniffing config...")
 			trayTemp := ui.NewTrayManager(configMgr, nil, nil)
 			trayTemp.SniffAndSolidifyConfig()
 		},
 		OnKernelReady: func() {
+			log.Println("[Main] Kernel ready, syncing config and proxy...")
 			trayTemp := ui.NewTrayManager(configMgr, nil, proxyMgr)
 			trayTemp.SyncConfigToKernel()
 
@@ -78,23 +95,41 @@ func main() {
 
 	trayMgr := ui.NewTrayManager(configMgr, kernelMgr, proxyMgr)
 
+	// 3. 优雅退出信号监听
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
+		log.Println("[Main] Received interrupt signal, gracefully shutting down...")
 		systray.Quit()
 	}()
 
+	// ✨ 4. 终极并发锁：绝对同步 UI 初始化与后台监控
+	// 彻底抛弃 time.Sleep，使用无缓冲 Channel 实现 0 误差放行
+	uiReady := make(chan struct{})
+
 	go func() {
-		time.Sleep(1 * time.Second)
+		<-uiReady // 在此绝对死等，直到 uiReady 通道被关闭
+		log.Println("[Main] UI initialization complete. Starting background daemons...")
 		go kernelMgr.MonitorKernelDaemon()
 		go trayMgr.MonitorIconState()
 		go trayMgr.WatchTunState()
 	}()
 
-	systray.Run(trayMgr.SetupTrayUI, func() {
+	// 5. 启动系统托盘主循环
+	systray.Run(func() {
+		// A. 强制同步执行 UI 初始化，这一步会把硬盘 JSON 完整读进内存
+		trayMgr.SetupTrayUI()
+		
+		// B. 内存 100% 准备就绪，关闭通道，瞬间放行后台监控协程
+		close(uiReady)
+
+	}, func() {
+		log.Println("[Main] Performing cleanup before exit...")
 		configMgr.MarkAsExiting()
-		client := &http.Client{Timeout: 200 * time.Millisecond}
+
+		// 清理 Web UI 残留端口
+		client := &http.Client{Timeout: 500 * time.Millisecond}
 		apiURL := "http://127.0.0.1:52719/json"
 		if resp, err := client.Get(apiURL); err == nil {
 			var targets []map[string]interface{}
@@ -109,9 +144,12 @@ func main() {
 			}
 			resp.Body.Close()
 		}
+
+		// 恢复系统代理状态并退出
 		proxyMgr.SetProxyRegistry(false)
 		systray.Quit()
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond) // 给 systray 自身清理留出极短的缓冲
+		log.Println("[Main] Cleanup finished, goodbye!")
 	})
 }
 
