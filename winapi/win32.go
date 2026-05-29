@@ -49,8 +49,8 @@ const (
 	SWP_NOMOVE     = 0x0002
 	SWP_SHOWWINDOW = 0x0040
 	SWP_SILKY      = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
-	SM_CXSCREEN    = 0 // 【保留原版】：防止常量丢失报错
-	SM_CYSCREEN    = 1 // 【保留原版】：防止常量丢失报错
+	SM_CXSCREEN    = 0
+	SM_CYSCREEN    = 1
 )
 
 var cachedWebUIHwnd atomic.Uintptr
@@ -58,7 +58,6 @@ var cachedWebUIHwnd atomic.Uintptr
 func init() {
 	procSetContext := u32.NewProc("SetProcessDpiAwarenessContext")
 	_, _, err := procSetContext.Call(uintptr(0xfffffffc))
-	// 【优化吸收】：更规范的错误判断逻辑
 	if err != nil && uint32(err.(syscall.Errno)) != 0 {
 		procSetAware := u32.NewProc("SetProcessDPIAware")
 		_, _, _ = procSetAware.Call()
@@ -88,6 +87,59 @@ func RefreshInternetOptions() {
 	_, _, _ = setOption.Call(0, 39, 0, 0)
 }
 
+// CalculateWindowBounds 是一个纯函数，负责计算护眼自适应的窗口宽高和绝对居中坐标
+func CalculateWindowBounds(scrW, scrH int) (winW, winH, winX, winY int) {
+	winW, winH = 1280, 768
+	if scrW > 0 && scrH > 0 {
+		w, h := float64(scrW), float64(scrH)
+		aspectRatio := w / h
+		switch {
+		case scrW >= 3840:
+			winW, winH = 1920, 1080
+		case aspectRatio > 2.0:
+			winW, winH = 1440, 900
+		case aspectRatio <= 1.05:
+			winW = int(w * 0.85)
+			winH = int(h * 0.65)
+			if winW < 800 {
+				winW = 800
+			}
+		case scrW >= 2560:
+			winW, winH = 1600, 960
+		case scrW >= 1920:
+			winW, winH = 1280, 800
+		case scrW == 1536 && scrH == 864:
+			winW, winH = 1150, 680
+		case scrW >= 1440:
+			winW, winH = 1150, 720
+		case scrW == 1366 && scrH == 768:
+			winW, winH = 1050, 640
+		case scrW <= 1280:
+			winW = int(w * 0.92)
+			winH = int(h * 0.88)
+			if winW < 960 {
+				winW = 960
+			}
+			if winH < 580 {
+				winH = 580
+			}
+		default:
+			winW = int(w * 0.75)
+			winH = int(h * 0.75)
+		}
+	}
+
+	winX = (scrW - winW) / 2
+	winY = (scrH - winH) / 2
+	if winX < 0 {
+		winX = 0
+	}
+	if winY < 0 {
+		winY = 0
+	}
+	return
+}
+
 func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -112,13 +164,9 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	}
 
 	procShowWindow.Call(targetHwnd, SW_RESTORE)
-
-	// 【优化吸收】：直接调用全局 proc，去掉原本在此处的性能消耗
 	procSwitchToThisWindow.Call(targetHwnd, 1)
-
 	procSetForeground.Call(targetHwnd)
 	procBringToTop.Call(targetHwnd)
-
 	procSetWindowPos.Call(targetHwnd, uintptr(0xFFFFFFFFFFFFFFFF), 0, 0, 0, 0, SWP_SILKY)
 
 	if targT != 0 && targT != currT {
@@ -157,16 +205,14 @@ func FindAndFocusChromeWindow(mainPid uint32, cm configContextInterface) bool {
 					return 0
 				}
 
-				// 【致命修复】：恢复原版被误删的子窗口层级穿透搜索！
-				// 现代 Chromium 架构的窗口标题通常不在顶层，必须通过 GetWindow 往深层查找
 				childCount := 0
-				child, _, _ := procGetWindow.Call(hwnd, 5) // 5 = GW_CHILD
+				child, _, _ := procGetWindow.Call(hwnd, 5)
 				for child != 0 {
 					childCount++
 					if childCount > 5 {
 						break
 					}
-					child, _, _ = procGetWindow.Call(child, 2) // 2 = GW_HWNDNEXT
+					child, _, _ = procGetWindow.Call(child, 2)
 				}
 
 				if childCount <= 5 {
