@@ -55,8 +55,8 @@ func (cm *ConfigManager) GetJsonConfig(key string) string {
 }
 
 func (cm *ConfigManager) EnsureDefaultConfig() {
-	// 【致命修复】：将锁提到最前面，彻底封死 TOCTOU（检查时间与使用时间差）漏洞
-	// 保证在读取本地文件、合并默认值并写入内存的过程中，绝不允许任何 SaveJsonConfig 篡改状态
+	// ✨ 【核心修复】：将锁提到最前面，彻底封死并发篡改漏洞！
+	// 保证在读取本地文件、合并默认值并写入内存的过程中，没有任何协程能打断
 	cm.configMu.Lock()
 	defer cm.configMu.Unlock()
 
@@ -92,6 +92,7 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		if b, marshalErr := json.Marshal(fileData); marshalErr == nil {
 			tmpPath := cfgPath + ".tmp_init"
 			if writeErr := os.WriteFile(tmpPath, b, 0644); writeErr == nil {
+				// 保留优化版的重试防杀软机制
 				for i := 0; i < 3; i++ {
 					if renameErr := os.Rename(tmpPath, cfgPath); renameErr == nil {
 						break
@@ -105,7 +106,6 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	for k, v := range fileData {
 		cm.configData[k] = v
 	}
-
 	currentProxy := cm.configData["proxy"]
 	currentTun := cm.configData["tun"]
 	currentMode := cm.configData["mode"]
@@ -152,11 +152,12 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		}
 	}
 
+	// 保留优化版的精髓：内存深拷贝后立刻解锁，避免阻塞 UI 线程
 	dataCopy := make(map[string]string, len(cm.configData))
 	for k, v := range cm.configData {
 		dataCopy[k] = v
 	}
-	cm.configMu.Unlock() // 内存深拷贝后立即解锁，不阻塞其他业务
+	cm.configMu.Unlock()
 
 	b, err := json.Marshal(dataCopy)
 	if err != nil {
@@ -186,6 +187,7 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 				}
 			}
 
+			// 保留优化版的重试机制，对抗 Windows 杀毒软件的文件占用
 			var renameErr error
 			for i := 0; i < 3; i++ {
 				renameErr = os.Rename(tmpPath, cfgPath)
