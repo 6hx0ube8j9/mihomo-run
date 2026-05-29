@@ -323,11 +323,11 @@ func (tm *TrayManager) ReloadConfigFile() {
 	isProxyEnabled := tm.cm.GetProxyState()
 
 	if isProxyEnabled {
-		tm.cm.SetLastAppliedProxy(true)
 		tm.pm.SetProxyRegistry(false)
 	}
 
 	_, _ = tm.DoAPIRequest("PUT", "/configs?force=true", nil)
+	tm.SniffAndSolidifyConfig()
 
 	go func() {
 		defer tm.cm.SetSystemInitializing(false)
