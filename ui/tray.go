@@ -825,7 +825,7 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 		}
 		encodedScript := base64.StdEncoding.EncodeToString(b)
 		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript)
-		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil {
 			success = true
 			log.Println("[UI] AutoStart enabled successfully.")
@@ -834,7 +834,7 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 		}
 	} else {
 		cmd := exec.Command("schtasks", "/Delete", "/TN", "\\"+taskName, "/F")
-		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil || !tm.CheckAutoStartStatus() {
 			success = true
 			log.Println("[UI] AutoStart disabled successfully.")
@@ -849,7 +849,7 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 
 func (tm *TrayManager) CheckAutoStartStatus() bool {
 	cmd := exec.Command("schtasks", "/Query", "/TN", "MihomoRunTask")
-	cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	return cmd.Run() == nil
 }
 
