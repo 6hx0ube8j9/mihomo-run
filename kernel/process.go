@@ -74,7 +74,7 @@ func (km *KernelManager) CloseJobObject() {
 
 func (km *KernelManager) IsProcessRunning(name string) bool {
 	h, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if err != nil {
+	if err != nil || h == windows.InvalidHandle {
 		return false
 	}
 	defer windows.CloseHandle(h)
@@ -101,7 +101,7 @@ func (km *KernelManager) IsProcessRunning(name string) bool {
 
 func (km *KernelManager) KillProcessByName(name string) {
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
-	if err != nil {
+	if err != nil || snapshot == windows.InvalidHandle {
 		return
 	}
 	defer windows.CloseHandle(snapshot)
@@ -139,7 +139,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			return
 		}
 
-		if km.kmIsProcessRunningActive("mihomo.exe") {
+		if km.IsProcessRunning("mihomo.exe") {
 			if !km.cm.IsKernelActive() {
 				km.KillProcessByName("mihomo.exe")
 				time.Sleep(300 * time.Millisecond)
@@ -212,8 +212,4 @@ func (km *KernelManager) MonitorKernelDaemon() {
 		km.cm.SetKernelActive(false)
 		time.Sleep(1 * time.Second)
 	}
-}
-
-func (km *KernelManager) kmIsProcessRunningActive(name string) bool {
-	return km.IsProcessRunning(name)
 }
