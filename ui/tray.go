@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/energye/systray"
@@ -39,8 +40,8 @@ type TrayManager struct {
 	km         *kernel.KernelManager
 	pm         *sysproxy.ProxyManager
 	httpClient *http.Client
+	bufPool    sync.Pool
 	mTun       *systray.MenuItem
-	// 移除了 bufPool，避免 HTTP 重试引发的并发安全问题
 }
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
@@ -48,7 +49,10 @@ func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysp
 		cm:         cm,
 		km:         km,
 		pm:         pm,
-		httpClient: &http.Client{Timeout: 1000 * time.Millisecond}, // 放宽一点超时，兼容低配设备
+		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
+		bufPool: sync.Pool{
+			New: func() interface{} { return bytes.NewBuffer(make([]byte, 0, 2048)) },
+		},
 	}
 }
 
@@ -63,17 +67,25 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	url := apiAddr + "/" + strings.TrimPrefix(path, "/")
 
 	var bodyReader io.Reader
+	var buf *bytes.Buffer
 
 	if payload != nil {
-		// 【底层优化】：使用 NewReader 完美支持 http.Client 的底层网络波动重试
-		b, err := json.Marshal(payload)
-		if err != nil {
+		buf = tm.bufPool.Get().(*bytes.Buffer)
+		buf.Reset()
+		if err := json.NewEncoder(buf).Encode(payload); err != nil {
+			tm.bufPool.Put(buf)
 			return nil, fmt.Errorf("marshal payload failed: %v", err)
 		}
-		bodyReader = bytes.NewReader(b)
+		bodyReader = buf
 	} else if method == "PUT" || method == "POST" || method == "PATCH" {
 		bodyReader = bytes.NewReader([]byte("{}"))
 	}
+
+	defer func() {
+		if buf != nil {
+			tm.bufPool.Put(buf)
+		}
+	}()
 
 	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
@@ -186,9 +198,6 @@ func (tm *TrayManager) CheckSystemState() int32 {
 
 func (tm *TrayManager) MonitorIconState() {
 	var successCounter int
-	// 【底层优化】：替换为 Ticker，避免 time.Sleep 的阻塞漂移
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
 
 	for {
 		if tm.cm.IsReallyExiting() {
@@ -253,7 +262,7 @@ func (tm *TrayManager) MonitorIconState() {
 				}
 			}
 		}
-		<-ticker.C
+		time.Sleep(1 * time.Second)
 	}
 }
 
