@@ -93,8 +93,7 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	}
 
 	if hasChanges || err != nil {
-		// ✨ 优化：使用 MarshalIndent 让人类能看懂生成的配置文件
-		if b, marshalErr := json.Marshal(fileData, "", "  "); marshalErr == nil {
+        if b, marshalErr := json.Marshal(fileData); marshalErr == nil {	
 			tmpPath := cfgPath + ".tmp_init"
 			if writeErr := os.WriteFile(tmpPath, b, 0644); writeErr == nil {
 				for i := 0; i < 3; i++ {
@@ -162,7 +161,7 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 	}
 	cm.configMu.Unlock()
 
-	b, err := json.Marshal(dataCopy, "", "  ")
+	b, err := json.Marshal(dataCopy)
 	if err != nil {
 		return
 	}
