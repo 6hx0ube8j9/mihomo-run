@@ -55,6 +55,11 @@ func (cm *ConfigManager) GetJsonConfig(key string) string {
 }
 
 func (cm *ConfigManager) EnsureDefaultConfig() {
+	// 【致命修复】：将锁提到最前面，彻底封死 TOCTOU（检查时间与使用时间差）漏洞
+	// 保证在读取本地文件、合并默认值并写入内存的过程中，绝不允许任何 SaveJsonConfig 篡改状态
+	cm.configMu.Lock()
+	defer cm.configMu.Unlock()
+
 	cfgPath := filepath.Join(cm.baseDir, CONFIG_FILE)
 	defaults := map[string]string{
 		"proxy":               "false",
@@ -85,7 +90,7 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 
 	if hasChanges || err != nil {
 		if b, marshalErr := json.Marshal(fileData); marshalErr == nil {
-			tmpPath := cfgPath + ".tmp"
+			tmpPath := cfgPath + ".tmp_init"
 			if writeErr := os.WriteFile(tmpPath, b, 0644); writeErr == nil {
 				for i := 0; i < 3; i++ {
 					if renameErr := os.Rename(tmpPath, cfgPath); renameErr == nil {
@@ -97,28 +102,27 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		}
 	}
 
-	cm.configMu.Lock()
 	for k, v := range fileData {
 		cm.configData[k] = v
 	}
+
 	currentProxy := cm.configData["proxy"]
 	currentTun := cm.configData["tun"]
 	currentMode := cm.configData["mode"]
-	cm.configMu.Unlock()
 
 	if currentProxy == "true" {
-		cm.SetProxyState(true)
+		atomic.StoreInt32(&cm.atomicProxyState, 1)
 	} else {
-		cm.SetProxyState(false)
+		atomic.StoreInt32(&cm.atomicProxyState, 0)
 	}
 
 	if currentTun == "true" {
-		cm.SetTunState(true)
+		atomic.StoreInt32(&cm.atomicTunState, 1)
 	} else {
-		cm.SetTunState(false)
+		atomic.StoreInt32(&cm.atomicTunState, 0)
 	}
 
-	cm.SetCurrentModeState(currentMode)
+	cm.currentModeState = currentMode
 }
 
 func (cm *ConfigManager) SaveJsonConfig(key, value string) {
@@ -148,12 +152,11 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		}
 	}
 
-	// 【优化吸收】：深拷贝，将昂贵的 json.Marshal 挪到锁的外面
 	dataCopy := make(map[string]string, len(cm.configData))
 	for k, v := range cm.configData {
 		dataCopy[k] = v
 	}
-	cm.configMu.Unlock() // 内存更新完毕，立刻解锁！极大提升并发性能
+	cm.configMu.Unlock() // 内存深拷贝后立即解锁，不阻塞其他业务
 
 	b, err := json.Marshal(dataCopy)
 	if err != nil {
@@ -183,7 +186,6 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 				}
 			}
 
-			// 【优化吸收】：Windows 下防止杀毒软件占用的延时重试策略
 			var renameErr error
 			for i := 0; i < 3; i++ {
 				renameErr = os.Rename(tmpPath, cfgPath)
