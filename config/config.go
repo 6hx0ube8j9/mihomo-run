@@ -55,8 +55,12 @@ func (cm *ConfigManager) GetJsonConfig(key string) string {
 }
 
 func (cm *ConfigManager) EnsureDefaultConfig() {
-	// ✨ 【核心修复】：将锁提到最前面，彻底封死并发篡改漏洞！
-	// 保证在读取本地文件、合并默认值并写入内存的过程中，没有任何协程能打断
+	// ✨ 优化：启动时自动清理上次意外断电/崩溃遗留的临时文件，保持目录绝对洁净
+	tmpFiles, _ := filepath.Glob(filepath.Join(cm.baseDir, CONFIG_FILE+".tmp*"))
+	for _, f := range tmpFiles {
+		_ = os.Remove(f)
+	}
+
 	cm.configMu.Lock()
 	defer cm.configMu.Unlock()
 
@@ -89,10 +93,10 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	}
 
 	if hasChanges || err != nil {
-		if b, marshalErr := json.Marshal(fileData); marshalErr == nil {
+		// ✨ 优化：使用 MarshalIndent 让人类能看懂生成的配置文件
+		if b, marshalErr := json.Marshal(fileData, "", "  "); marshalErr == nil {
 			tmpPath := cfgPath + ".tmp_init"
 			if writeErr := os.WriteFile(tmpPath, b, 0644); writeErr == nil {
-				// 保留优化版的重试防杀软机制
 				for i := 0; i < 3; i++ {
 					if renameErr := os.Rename(tmpPath, cfgPath); renameErr == nil {
 						break
@@ -152,14 +156,13 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		}
 	}
 
-	// 保留优化版的精髓：内存深拷贝后立刻解锁，避免阻塞 UI 线程
 	dataCopy := make(map[string]string, len(cm.configData))
 	for k, v := range cm.configData {
 		dataCopy[k] = v
 	}
 	cm.configMu.Unlock()
 
-	b, err := json.Marshal(dataCopy)
+	b, err := json.Marshal(dataCopy, "", "  ")
 	if err != nil {
 		return
 	}
@@ -187,7 +190,6 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 				}
 			}
 
-			// 保留优化版的重试机制，对抗 Windows 杀毒软件的文件占用
 			var renameErr error
 			for i := 0; i < 3; i++ {
 				renameErr = os.Rename(tmpPath, cfgPath)
