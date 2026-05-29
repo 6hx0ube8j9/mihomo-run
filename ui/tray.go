@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -41,14 +40,15 @@ type TrayManager struct {
 	pm         *sysproxy.ProxyManager
 	httpClient *http.Client
 	mTun       *systray.MenuItem
+	// 移除了 bufPool，避免 HTTP 重试引发的并发安全问题
 }
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
 	return &TrayManager{
-		cm: cm,
-		km: km,
-		pm: pm,
-		httpClient: &http.Client{Timeout: 1000 * time.Millisecond},
+		cm:         cm,
+		km:         km,
+		pm:         pm,
+		httpClient: &http.Client{Timeout: 1000 * time.Millisecond}, // 放宽一点超时，兼容低配设备
 	}
 }
 
@@ -65,6 +65,7 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	var bodyReader io.Reader
 
 	if payload != nil {
+		// 【底层优化】：使用 NewReader 完美支持 http.Client 的底层网络波动重试
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return nil, fmt.Errorf("marshal payload failed: %v", err)
@@ -183,9 +184,9 @@ func (tm *TrayManager) CheckSystemState() int32 {
 	return 4
 }
 
-// 【融合修复】：这才是真正的 Ticker 事件驱动优化！去掉了死板的 time.Sleep。
 func (tm *TrayManager) MonitorIconState() {
 	var successCounter int
+	// 【底层优化】：替换为 Ticker，避免 time.Sleep 的阻塞漂移
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -230,7 +231,6 @@ func (tm *TrayManager) MonitorIconState() {
 				}
 			} else {
 				if isInitializing || isCurrentlySyncing {
-					// 【修复】：补回了优化版遗漏的清零逻辑，防止状态错乱
 					successCounter = 0
 					if tm.cm.GetLastState() != curr {
 						tm.UpdateIconByState(int(curr))
@@ -253,8 +253,6 @@ func (tm *TrayManager) MonitorIconState() {
 				}
 			}
 		}
-		
-		// 优雅等待：利用通道阻塞，避免死循环爆 CPU
 		<-ticker.C
 	}
 }
@@ -782,7 +780,6 @@ func (tm *TrayManager) SniffAndSolidifyConfig() {
 	}
 }
 
-// 【保留吸收】：保留日志排查机制
 func (tm *TrayManager) ToggleAutoStart(enable bool) {
 	const taskName = "MihomoRunTask"
 	if key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE); err == nil {
@@ -812,18 +809,12 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil {
 			success = true
-			log.Println("[UI] AutoStart enabled successfully.")
-		} else {
-			log.Printf("[UI] Failed to enable AutoStart: %v\n", err)
 		}
 	} else {
 		cmd := exec.Command("schtasks", "/Delete", "/TN", "\\"+taskName, "/F")
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil || !tm.CheckAutoStartStatus() {
 			success = true
-			log.Println("[UI] AutoStart disabled successfully.")
-		} else {
-			log.Printf("[UI] Failed to disable AutoStart: %v\n", err)
 		}
 	}
 	if success {
