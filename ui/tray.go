@@ -541,12 +541,9 @@ func (tm *TrayManager) LaunchWebUI() {
 }
 
 func (tm *TrayManager) SetupTrayUI() {
+	tm.UpdateIconByState(0)
 	tm.cm.SetSystemInitializing(true)
-
-	// ✨ 【致命修复】：无论如何，必须先读取配置文件！
 	tm.cm.EnsureDefaultConfig()
-	// 然后才能检测自启，这样才不会用空数据覆盖硬盘
-	tm.ToggleAutoStart(tm.CheckAutoStartStatus())
 	tm.SniffAndSolidifyConfig()
 
 	initProxyChecked := tm.cm.GetProxyState()
@@ -554,7 +551,6 @@ func (tm *TrayManager) SetupTrayUI() {
 	initModeChecked := tm.cm.GetCurrentModeState()
 
 	tm.pm.SetProxyRegistry(initProxyChecked)
-	tm.UpdateIconByState(0)
 
 	systray.SetOnClick(func(menu systray.IMenu) {
 		if tm.cm.IsSystemInitializing() {
