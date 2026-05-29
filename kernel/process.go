@@ -72,6 +72,7 @@ func (km *KernelManager) CloseJobObject() {
 	}
 }
 
+// 坚持使用最高效的原生 Win32 API 遍历进程快照
 func (km *KernelManager) IsProcessRunning(name string) bool {
 	h, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
@@ -99,6 +100,7 @@ func (km *KernelManager) IsProcessRunning(name string) bool {
 	return false
 }
 
+// 使用原生 API 发送终结信号，精确且无额外开销
 func (km *KernelManager) KillProcessByName(name string) {
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
@@ -139,6 +141,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			return
 		}
 
+		// 1. 若外部进程已经存在，则保持观察
 		if km.kmIsProcessRunningActive("mihomo.exe") {
 			if km.cm.IsSystemInitializing() && !km.cm.IsSyncing() {
 				km.cm.SetSystemInitializing(false)
@@ -147,6 +150,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			continue
 		}
 
+		// 2. 准备启动流程
 		km.cm.SetSystemInitializing(true)
 		km.cm.SetHasFirstSynced(false)
 		km.cm.SetKernelActive(false)
@@ -166,6 +170,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			continue
 		}
 
+		// 3. 启动成功，更新状态并触发回调
 		km.cm.SetKernelActive(true)
 		if km.hooks.OnKernelStarted != nil {
 			km.hooks.OnKernelStarted()
@@ -179,6 +184,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			}
 		}
 
+		// 等待内核端口初始化的合理时延
 		go func() {
 			time.Sleep(1000 * time.Millisecond)
 			if km.cm.IsKernelActive() && km.hooks.OnKernelReady != nil {
@@ -186,6 +192,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			}
 		}()
 
+		// 4. 利用通道实现非阻塞的进程结束监控
 		processDone := make(chan error, 1)
 		go func() {
 			processDone <- cmd.Wait()
@@ -196,20 +203,23 @@ func (km *KernelManager) MonitorKernelDaemon() {
 		for {
 			select {
 			case <-processDone:
+				// 内核异常崩溃，跳出循环进行重启
 				break WaitLoop
-
 			case <-ticker.C:
 				if km.cm.IsReallyExiting() {
 					km.KillProcessByName("mihomo.exe")
 					ticker.Stop()
 					return
 				}
+				if km.cm.IsSystemInitializing() && !km.cm.IsSyncing() {
+					km.cm.SetSystemInitializing(false)
+				}
 			}
 		}
 
 		ticker.Stop()
 		km.cm.SetKernelActive(false)
-		time.Sleep(1 * time.Second)
+		time.Sleep(1 * time.Second) // 避免因启动配置错误导致死循环飙升 CPU
 	}
 }
 
