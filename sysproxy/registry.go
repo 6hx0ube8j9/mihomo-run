@@ -61,27 +61,27 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		}
 		serverStr := "127.0.0.1:" + port
 
-		// 【优化吸收】：更严谨的操作，避免写一半失败导致系统代理崩溃
+		// 严格模式：捕获每一步的写入结果
 		errServer := key.SetStringValue("ProxyServer", serverStr)
 		errEnable := key.SetDWordValue("ProxyEnable", 1)
 
-		// 删除 PAC 配置，防止与系统全局代理冲突
+		// 删除 PAC 配置，防止与系统全局代理冲突（静默处理错误）
 		errPac := key.DeleteValue("AutoConfigURL")
 		if errPac != nil && !errors.Is(errPac, syscall.ERROR_FILE_NOT_FOUND) {
-			// 仅做静默处理，不中断主流程
+			// Do nothing
 		}
 
 		if errServer == nil && errEnable == nil {
 			success = true
 		} else {
-			// 【优化吸收】：回滚机制 - 如果设置服务器失败，则强行关闭代理，防止网络断网
+			// 写入失败的回滚机制，防止断网
 			_ = key.SetDWordValue("ProxyEnable", 0)
 		}
 	} else {
 		errEnable := key.SetDWordValue("ProxyEnable", 0)
 		errServer := key.DeleteValue("ProxyServer")
 		if errServer != nil && !errors.Is(errServer, syscall.ERROR_FILE_NOT_FOUND) {
-			// 仅做静默处理
+			// Do nothing
 		}
 
 		if errEnable == nil {
@@ -89,19 +89,16 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		}
 	}
 
-	// 【核心修复】：只有当注册表真实操作成功后，才更新内存和保存配置，防止状态不一致
+	// 核心安全逻辑：仅在底层注册表真实修改成功后，才更新业务状态
 	if success {
 		pm.cm.SetLastAppliedProxy(enable)
-		
-		// 找回被优化版弄丢的接口调用
 		pm.cm.SetProxyState(enable)
 
-		// 找回被优化版弄丢的本地配置保存，并且保留原版判断是否正在退出的安全机制
 		if !pm.cm.IsReallyExiting() {
 			pm.cm.SaveJsonConfig("proxy", strconv.FormatBool(enable))
 		}
 
-		// 找回原版的并发通知机制，防止 Windows API 拥塞导致 UI 假死
+		// 异步通知 Windows 刷新网络设置，防止阻塞主线程
 		if pm.win != nil {
 			go func() {
 				pm.win.RefreshInternetOptions()
