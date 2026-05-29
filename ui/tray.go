@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/energye/systray"
@@ -40,7 +40,6 @@ type TrayManager struct {
 	km         *kernel.KernelManager
 	pm         *sysproxy.ProxyManager
 	httpClient *http.Client
-	bufPool    sync.Pool
 	mTun       *systray.MenuItem
 }
 
@@ -49,10 +48,8 @@ func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysp
 		cm:         cm,
 		km:         km,
 		pm:         pm,
+		// 统一超时时间为 500ms，保持底层响应敏捷
 		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
-		bufPool: sync.Pool{
-			New: func() interface{} { return bytes.NewBuffer(make([]byte, 0, 2048)) },
-		},
 	}
 }
 
@@ -67,25 +64,16 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	url := apiAddr + "/" + strings.TrimPrefix(path, "/")
 
 	var bodyReader io.Reader
-	var buf *bytes.Buffer
 
 	if payload != nil {
-		buf = tm.bufPool.Get().(*bytes.Buffer)
-		buf.Reset()
-		if err := json.NewEncoder(buf).Encode(payload); err != nil {
-			tm.bufPool.Put(buf)
+		b, err := json.Marshal(payload)
+		if err != nil {
 			return nil, fmt.Errorf("marshal payload failed: %v", err)
 		}
-		bodyReader = buf
+		bodyReader = bytes.NewReader(b)
 	} else if method == "PUT" || method == "POST" || method == "PATCH" {
 		bodyReader = bytes.NewReader([]byte("{}"))
 	}
-
-	defer func() {
-		if buf != nil {
-			tm.bufPool.Put(buf)
-		}
-	}()
 
 	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
@@ -198,71 +186,75 @@ func (tm *TrayManager) CheckSystemState() int32 {
 
 func (tm *TrayManager) MonitorIconState() {
 	var successCounter int
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
 	for {
-		if tm.cm.IsReallyExiting() {
-			return
-		}
-
-		if !tm.km.IsProcessRunning("mihomo.exe") {
-			tm.cm.SetTunErrorCounter(0)
-			successCounter = 0
-
-			if tm.cm.GetLastState() != 0 {
-				tm.UpdateIconByState(0)
-				tm.cm.SetLastState(0)
+		select {
+		case <-ticker.C:
+			if tm.cm.IsReallyExiting() {
+				return
 			}
-		} else {
-			curr := tm.CheckSystemState()
-			isTunModeInConfig := tm.cm.GetTunState()
-			isPhysicalLost := !tm.cm.IsTunInterfaceCurrentlyAlive()
-			isInitializing := tm.cm.IsSystemInitializing()
-			isCurrentlySyncing := tm.cm.IsSyncing()
 
-			isBroken := (curr == 0) || (isTunModeInConfig && isPhysicalLost && !isInitializing && !isCurrentlySyncing)
-
-			if isBroken {
+			if !tm.km.IsProcessRunning("mihomo.exe") {
+				tm.cm.SetTunErrorCounter(0)
 				successCounter = 0
-				if tm.cm.GetTunErrorCounter() < 5 {
-					tm.cm.AddTunErrorCounter(1)
-				}
 
-				if tm.cm.GetTunErrorCounter() > 2 {
-					targetState := int32(1)
-					if curr == 0 {
-						targetState = 0
-					}
-
-					if tm.cm.GetLastState() != targetState {
-						tm.UpdateIconByState(int(targetState))
-						tm.cm.SetLastState(targetState)
-					}
+				if tm.cm.GetLastState() != 0 {
+					tm.UpdateIconByState(0)
+					tm.cm.SetLastState(0)
 				}
 			} else {
-				if isInitializing || isCurrentlySyncing {
-					successCounter = 0
-					if tm.cm.GetLastState() != curr {
-						tm.UpdateIconByState(int(curr))
-						tm.cm.SetLastState(curr)
-					}
-				} else {
-					successCounter++
-					currentErrCount := tm.cm.GetTunErrorCounter()
+				curr := tm.CheckSystemState()
+				isTunModeInConfig := tm.cm.GetTunState()
+				isPhysicalLost := !tm.cm.IsTunInterfaceCurrentlyAlive()
+				isInitializing := tm.cm.IsSystemInitializing()
+				isCurrentlySyncing := tm.cm.IsSyncing()
 
-					if currentErrCount <= 2 || successCounter >= 3 {
-						if successCounter >= 3 {
-							tm.cm.SetTunErrorCounter(0)
+				isBroken := (curr == 0) || (isTunModeInConfig && isPhysicalLost && !isInitializing && !isCurrentlySyncing)
+
+				if isBroken {
+					successCounter = 0
+					if tm.cm.GetTunErrorCounter() < 5 {
+						tm.cm.AddTunErrorCounter(1)
+					}
+
+					if tm.cm.GetTunErrorCounter() > 2 {
+						targetState := int32(1)
+						if curr == 0 {
+							targetState = 0
 						}
 
+						if tm.cm.GetLastState() != targetState {
+							tm.UpdateIconByState(int(targetState))
+							tm.cm.SetLastState(targetState)
+						}
+					}
+				} else {
+					if isInitializing || isCurrentlySyncing {
+						successCounter = 0
 						if tm.cm.GetLastState() != curr {
 							tm.UpdateIconByState(int(curr))
 							tm.cm.SetLastState(curr)
 						}
+					} else {
+						successCounter++
+						currentErrCount := tm.cm.GetTunErrorCounter()
+
+						if currentErrCount <= 2 || successCounter >= 3 {
+							if successCounter >= 3 {
+								tm.cm.SetTunErrorCounter(0)
+							}
+
+							if tm.cm.GetLastState() != curr {
+								tm.UpdateIconByState(int(curr))
+								tm.cm.SetLastState(curr)
+							}
+						}
 					}
 				}
 			}
 		}
-		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -551,8 +543,10 @@ func (tm *TrayManager) LaunchWebUI() {
 func (tm *TrayManager) SetupTrayUI() {
 	tm.cm.SetSystemInitializing(true)
 
-	tm.ToggleAutoStart(tm.CheckAutoStartStatus())
+	// ✨ 【致命修复】：无论如何，必须先读取配置文件！
 	tm.cm.EnsureDefaultConfig()
+	// 然后才能检测自启，这样才不会用空数据覆盖硬盘
+	tm.ToggleAutoStart(tm.CheckAutoStartStatus())
 	tm.SniffAndSolidifyConfig()
 
 	initProxyChecked := tm.cm.GetProxyState()
@@ -584,6 +578,10 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	mProxy := systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
 	mProxy.Click(func() {
+		// 防抖保护，防止高频点击写坏注册表
+		if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
+			return
+		}
 		next := !mProxy.Checked()
 		tm.pm.SetProxyRegistry(next)
 		if next {
@@ -595,6 +593,10 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	tm.mTun = systray.AddMenuItemCheckbox("虚拟网卡 (TUN)", "", initTunChecked)
 	tm.mTun.Click(func() {
+		// 防抖保护，防止并发炸服
+		if !tm.cm.CheckAndThrottleClick(int64(800 * time.Millisecond)) {
+			return
+		}
 		next := !tm.mTun.Checked()
 		if next {
 			tm.mTun.Check()
@@ -611,6 +613,9 @@ func (tm *TrayManager) SetupTrayUI() {
 	setupMode := func(key, label string) {
 		modeMenus[key] = mModeRoot.AddSubMenuItemCheckbox(label, "", initModeChecked == key)
 		modeMenus[key].Click(func() {
+			if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
+				return
+			}
 			for k, menu := range modeMenus {
 				if k == key {
 					menu.Check()
@@ -635,6 +640,9 @@ func (tm *TrayManager) SetupTrayUI() {
 	mMoreRoot := systray.AddMenuItem("更多", "")
 	mAuto := mMoreRoot.AddSubMenuItemCheckbox("开机自启动", "", tm.CheckAutoStartStatus())
 	mAuto.Click(func() {
+		if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
+			return
+		}
 		next := !mAuto.Checked()
 		tm.ToggleAutoStart(next)
 		if next {
@@ -646,6 +654,9 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	mRestart := mMoreRoot.AddSubMenuItem("重启内核", "")
 	mRestart.Click(func() {
+		if !tm.cm.CheckAndThrottleClick(int64(1000 * time.Millisecond)) {
+			return
+		}
 		tm.cm.SetSystemInitializing(true)
 		tm.cm.SetHasFirstSynced(false)
 		tm.km.KillProcessByName("mihomo.exe")
@@ -654,6 +665,9 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	mReload := mMoreRoot.AddSubMenuItem("重载配置文件", "")
 	mReload.Click(func() {
+		if !tm.cm.CheckAndThrottleClick(int64(1000 * time.Millisecond)) {
+			return
+		}
 		tm.ReloadConfigFile()
 	})
 
@@ -818,12 +832,18 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil {
 			success = true
+			log.Println("[UI] AutoStart enabled successfully.")
+		} else {
+			log.Printf("[UI] Failed to enable AutoStart: %v\n", err)
 		}
 	} else {
 		cmd := exec.Command("schtasks", "/Delete", "/TN", "\\"+taskName, "/F")
 		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil || !tm.CheckAutoStartStatus() {
 			success = true
+			log.Println("[UI] AutoStart disabled successfully.")
+		} else {
+			log.Printf("[UI] Failed to disable AutoStart: %v\n", err)
 		}
 	}
 	if success {
