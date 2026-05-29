@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/energye/systray"
@@ -35,6 +36,13 @@ const debugPort = "52719"
 
 var tunKeywords = []string{"mihomo", "meta", "clash", "sing-box", "wintun"}
 
+// 🌟 新增：极低开销的内存复用池，压榨 GC 负担
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, 2048))
+	},
+}
+
 type TrayManager struct {
 	cm         *config.ConfigManager
 	km         *kernel.KernelManager
@@ -45,10 +53,9 @@ type TrayManager struct {
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
 	return &TrayManager{
-		cm:         cm,
-		km:         km,
-		pm:         pm,
-		// 统一超时时间为 500ms，保持底层响应敏捷
+		cm: cm,
+		km: km,
+		pm: pm,
 		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
 	}
 }
@@ -64,16 +71,26 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	url := apiAddr + "/" + strings.TrimPrefix(path, "/")
 
 	var bodyReader io.Reader
+	var buf *bytes.Buffer
 
+	// 🌟 启用内存池机制
 	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
+		buf = bufPool.Get().(*bytes.Buffer)
+		buf.Reset() // 绝不串味
+		if err := json.NewEncoder(buf).Encode(payload); err != nil {
+			bufPool.Put(buf)
 			return nil, fmt.Errorf("marshal payload failed: %v", err)
 		}
-		bodyReader = bytes.NewReader(b)
+		bodyReader = buf
 	} else if method == "PUT" || method == "POST" || method == "PATCH" {
 		bodyReader = bytes.NewReader([]byte("{}"))
 	}
+
+	defer func() {
+		if buf != nil {
+			bufPool.Put(buf)
+		}
+	}()
 
 	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
@@ -433,10 +450,13 @@ func (tm *TrayManager) LaunchWebUI() {
 		}
 	}
 
+	// 🌟 优化：清空僵尸端口占用的绝对静默执行
 	if isPortOccupied {
-		killCmd := "for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :" + debugPort + " ^| findstr LISTENING') do taskkill /F /PID %%a"
-		_ = exec.Command("cmd", "/c", killCmd).Run()
-		time.Sleep(150 * time.Millisecond)
+		killCmd := fmt.Sprintf("for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :%s ^| findstr LISTENING') do taskkill /F /PID %%a", debugPort)
+		cmd := exec.Command("cmd", "/c", killCmd)
+		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+		_ = cmd.Run()
+		time.Sleep(150 * time.Millisecond) // 给操作系统释放句柄的缓冲时间
 	}
 
 	var browserPath string
@@ -460,57 +480,10 @@ func (tm *TrayManager) LaunchWebUI() {
 		userDataDir := filepath.Join(tm.cm.BaseDir(), "webcache")
 		_ = os.MkdirAll(userDataDir, 0755)
 
+		// 🌟 引入纯函数进行动态 UI 缩放与居中
 		scrW := winapi.GetSystemMetrics(0)
 		scrH := winapi.GetSystemMetrics(1)
-
-		winW, winH := 1280, 768
-		if scrW > 0 && scrH > 0 {
-			w, h := float64(scrW), float64(scrH)
-			aspectRatio := w / h
-			switch {
-			case scrW >= 3840:
-				winW, winH = 1920, 1080
-			case aspectRatio > 2.0:
-				winW, winH = 1440, 900
-			case aspectRatio <= 1.05:
-				winW = int(w * 0.85)
-				winH = int(h * 0.65)
-				if winW < 800 {
-					winW = 800
-				}
-			case scrW >= 2560:
-				winW, winH = 1600, 960
-			case scrW >= 1920:
-				winW, winH = 1280, 800
-			case scrW == 1536 && scrH == 864:
-				winW, winH = 1150, 680
-			case scrW >= 1440:
-				winW, winH = 1150, 720
-			case scrW == 1366 && scrH == 768:
-				winW, winH = 1050, 640
-			case scrW <= 1280:
-				winW = int(w * 0.92)
-				winH = int(h * 0.88)
-				if winW < 960 {
-					winW = 960
-				}
-				if winH < 580 {
-					winH = 580
-				}
-			default:
-				winW = int(w * 0.75)
-				winH = int(h * 0.75)
-			}
-		}
-
-		winX := (scrW - winW) / 2
-		winY := (scrH - winH) / 2
-		if winX < 0 {
-			winX = 0
-		}
-		if winY < 0 {
-			winY = 0
-		}
+		winW, winH, winX, winY := winapi.CalculateWindowBounds(scrW, scrH)
 
 		args := []string{
 			"--app=" + finalURL,
@@ -537,6 +510,23 @@ func (tm *TrayManager) LaunchWebUI() {
 		}
 	} else {
 		_ = exec.Command("cmd", "/c", "start", "", finalURL).Start()
+	}
+}
+
+// 🌟 新增：优雅的标签页陪葬机制，防止孤儿窗口残留
+func (tm *TrayManager) CleanupWebUI() {
+	client := &http.Client{Timeout: 200 * time.Millisecond} // 极短超时，决不阻塞主程序退出
+	apiURL := fmt.Sprintf("http://127.0.0.1:%s/json", debugPort)
+	if resp, err := client.Get(apiURL); err == nil {
+		var targets []map[string]interface{}
+		if json.NewDecoder(resp.Body).Decode(&targets) == nil {
+			for _, t := range targets {
+				if id, ok := t["id"].(string); ok {
+					_, _ = client.Get(fmt.Sprintf("http://127.0.0.1:%s/json/close/%s", debugPort, id))
+				}
+			}
+		}
+		_ = resp.Body.Close()
 	}
 }
 
@@ -574,7 +564,6 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	mProxy := systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
 	mProxy.Click(func() {
-		// 防抖保护，防止高频点击写坏注册表
 		if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
 			return
 		}
@@ -589,7 +578,6 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	tm.mTun = systray.AddMenuItemCheckbox("虚拟网卡 (TUN)", "", initTunChecked)
 	tm.mTun.Click(func() {
-		// 防抖保护，防止并发炸服
 		if !tm.cm.CheckAndThrottleClick(int64(800 * time.Millisecond)) {
 			return
 		}
@@ -681,6 +669,7 @@ func (tm *TrayManager) SetupTrayUI() {
 	mExit := systray.AddMenuItem("退出程序", "")
 	mExit.Click(func() {
 		tm.cm.MarkAsExiting()
+		tm.CleanupWebUI() // 🌟 退出前无感清场
 		systray.Quit()
 	})
 }
