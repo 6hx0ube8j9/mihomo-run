@@ -158,7 +158,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 
 		cmd := exec.Command(target, "-d", ".")
 		cmd.Dir = absBaseDir
-		cmd.SysProcAttr = &windows.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 
 		if err := cmd.Start(); err != nil {
 			km.cm.SetKernelActive(false)
