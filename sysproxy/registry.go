@@ -46,22 +46,19 @@ func NewProxyManager(cm ConfigInterface, win Win32APIInterface) *ProxyManager {
 }
 
 func (pm *ProxyManager) SetProxyRegistry(enable bool) {
-	if pm.cm.GetLastAppliedProxy() == enable {
-		return
-	}
-
-	key, err := registry.OpenKey(registry.CURRENT_USER, REG_PROXY, registry.SET_VALUE)
+	key, err := registry.OpenKey(registry.CURRENT_USER, REG_PROXY, registry.QUERY_VALUE|registry.SET_VALUE)
 	if err != nil {
 		return
 	}
 	defer key.Close()
-	
+
 	currentEnable, _, err := key.GetIntegerValue("ProxyEnable")
 	realEnabled := (err == nil && currentEnable == 1)
-	
+
 	if pm.cm.GetLastAppliedProxy() == enable && realEnabled == enable {
 		return
-	}	
+	}
+
 	success := false
 
 	if enable {
@@ -72,10 +69,10 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		serverStr := "127.0.0.1:" + port
 
 		errServer := key.SetStringValue("ProxyServer", serverStr)
-		errEnable := key.SetDWordValue("ProxyEnable", 1)	
+		errEnable := key.SetDWordValue("ProxyEnable", 1)
 		bypassStr := "<local>;localhost;127.*;10.*;100.64.*;169.254.*;172.16.*;192.168.*"
 		errBypass := key.SetStringValue("ProxyOverride", bypassStr)
-		
+
 		errPac := key.DeleteValue("AutoConfigURL")
 		if errPac != nil && !errors.Is(errPac, syscall.ERROR_FILE_NOT_FOUND) {
 		}
