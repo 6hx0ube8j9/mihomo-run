@@ -64,6 +64,7 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 
 func setNativeProxy(server, bypass string) {
 	options := make([]internetPerConnOption, 3)
+
 	options[0].dwOption = INTERNET_PER_CONN_FLAGS
 	options[0].Value = uintptr(PROXY_TYPE_PROXY | PROXY_TYPE_DIRECT)
 
@@ -100,6 +101,7 @@ func setNativeProxy(server, bypass string) {
 
 func clearNativeProxy() {
 	options := make([]internetPerConnOption, 1)
+
 	options[0].dwOption = INTERNET_PER_CONN_FLAGS
 	options[0].Value = uintptr(PROXY_TYPE_DIRECT)
 
