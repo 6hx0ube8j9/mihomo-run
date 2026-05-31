@@ -55,7 +55,6 @@ func (cm *ConfigManager) GetJsonConfig(key string) string {
 }
 
 func (cm *ConfigManager) EnsureDefaultConfig() {
-	// ✨ 优化：启动时自动清理上次意外断电/崩溃遗留的临时文件，保持目录绝对洁净
 	tmpFiles, _ := filepath.Glob(filepath.Join(cm.baseDir, CONFIG_FILE+".tmp*"))
 	for _, f := range tmpFiles {
 		_ = os.Remove(f)
@@ -93,7 +92,7 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	}
 
 	if hasChanges || err != nil {
-        if b, marshalErr := json.Marshal(fileData); marshalErr == nil {	
+		if b, marshalErr := json.Marshal(fileData); marshalErr == nil {
 			tmpPath := cfgPath + ".tmp_init"
 			if writeErr := os.WriteFile(tmpPath, b, 0644); writeErr == nil {
 				for i := 0; i < 3; i++ {
