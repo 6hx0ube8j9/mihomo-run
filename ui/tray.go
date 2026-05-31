@@ -558,17 +558,17 @@ func (tm *TrayManager) SetupTrayUI() {
 	systray.AddSeparator()
 
 	mProxy := systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
-	mProxy.Click(func() {
+    mProxy.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
 			return
 		}
 		next := !mProxy.Checked()
-		tm.pm.SetProxyRegistry(next)
 		if next {
 			mProxy.Check()
 		} else {
 			mProxy.Uncheck()
 		}
+		go tm.pm.SetProxyRegistry(next)
 	})
 
 	tm.mTun = systray.AddMenuItemCheckbox("虚拟网卡 (TUN)", "", initTunChecked)
@@ -632,14 +632,17 @@ func (tm *TrayManager) SetupTrayUI() {
 	})
 
 	mRestart := mMoreRoot.AddSubMenuItem("重启内核", "")
-	mRestart.Click(func() {
+    mRestart.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(1000 * time.Millisecond)) {
 			return
 		}
 		tm.cm.SetSystemInitializing(true)
 		tm.cm.SetHasFirstSynced(false)
-		tm.km.KillProcessByName("mihomo.exe")
-		tm.SniffAndSolidifyConfig()
+		
+		go func() {
+			tm.km.KillProcessByName("mihomo.exe")
+			tm.SniffAndSolidifyConfig()
+		}()
 	})
 
 	mReload := mMoreRoot.AddSubMenuItem("重载配置文件", "")
