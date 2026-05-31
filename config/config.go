@@ -49,9 +49,12 @@ func NewConfigManager(baseDir, exePath string) *ConfigManager {
 }
 
 func (cm *ConfigManager) GetJsonConfig(key string) string {
+	log.Printf("[DEBUG-LOCK] GetJsonConfig WAIT RLock: %s\n", key)
 	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.configData[key]
+	val := cm.configData[key]
+	cm.configMu.RUnlock()
+	log.Printf("[DEBUG-LOCK] GetJsonConfig RELEASE RLock: %s\n", key)
+	return val
 }
 
 func (cm *ConfigManager) EnsureDefaultConfig() {
