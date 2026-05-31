@@ -5,7 +5,6 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
 
 	"mihomo-run/config"
 )
@@ -50,37 +49,25 @@ func NewProxyManager(cm *config.ConfigManager) *ProxyManager {
 }
 
 func (pm *ProxyManager) SetProxyRegistry(enable bool) {
-	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.SET_VALUE)
-	if err == nil {
-		if enable {
-			port := pm.cm.GetJsonConfig("port")
-			if port == "" || len(port) < 4 {
-				port = "7890"
-			}
-			server := "127.0.0.1:" + port
-			bypass := "<local>;localhost;127.*;10.*;192.168.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;169.254.*;::1"
-			
-			_ = key.SetDWordValue("ProxyEnable", 1)
-			_ = key.SetStringValue("ProxyServer", server)
-			_ = key.SetStringValue("ProxyOverride", bypass)
-			_ = key.DeleteValue("AutoConfigURL")
-
-			setNativeProxy(server, bypass)
-
-			pm.cm.SaveJsonConfig("proxy", "true")
-		} else {
-			_ = key.SetDWordValue("ProxyEnable", 0)
-			_ = key.DeleteValue("ProxyServer")
-			_ = key.DeleteValue("ProxyOverride")
-
-			clearNativeProxy()
-
-			pm.cm.SaveJsonConfig("proxy", "false")
+	if enable {
+		port := pm.cm.GetJsonConfig("port")
+		if port == "" || len(port) < 4 {
+			port = "7890"
 		}
-		key.Close()
+		server := "127.0.0.1:" + port
+		bypass := "<local>;localhost;127.*;10.*;192.168.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;169.254.*;::1"
+
+		setNativeProxy(server, bypass)
+		
+		pm.cm.SaveJsonConfig("proxy", "true")
+	} else {
+		clearNativeProxy()
+		
+		pm.cm.SaveJsonConfig("proxy", "false")
 	}
 }
 
+// setNativeProxy 纯正原生 API，自动同步系统底层缓存与外部 UI
 func setNativeProxy(server, bypass string) {
 	options := make([]internetPerConnOption, 3)
 	options[0].dwOption = INTERNET_PER_CONN_FLAGS
@@ -96,12 +83,13 @@ func setNativeProxy(server, bypass string) {
 
 	list := internetPerConnOptionList{
 		dwSize:        uint32(unsafe.Sizeof(internetPerConnOptionList{})),
-		pszConnection: nil,
+		pszConnection: nil, // nil 代表全局 LAN 设置
 		dwOptionCount: 3,
 		dwOptionError: 0,
 		pOptions:      &options[0],
 	}
 
+	// 核心调用：更新系统代理状态
 	_, _, _ = setOption.Call(
 		0,
 		INTERNET_OPTION_PER_CONNECTION_OPTION,
@@ -109,9 +97,11 @@ func setNativeProxy(server, bypass string) {
 		uintptr(unsafe.Sizeof(list)),
 	)
 
+	// 发出全局广播，让系统立刻生效
 	_, _, _ = setOption.Call(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
 	_, _, _ = setOption.Call(0, INTERNET_OPTION_REFRESH, 0, 0)
 
+	// 防止 Go 极速垃圾回收提前释放指针
 	runtime.KeepAlive(serverPtr)
 	runtime.KeepAlive(bypassPtr)
 	runtime.KeepAlive(options)
@@ -120,7 +110,7 @@ func setNativeProxy(server, bypass string) {
 func clearNativeProxy() {
 	options := make([]internetPerConnOption, 1)
 	options[0].dwOption = INTERNET_PER_CONN_FLAGS
-	options[0].Value = uintptr(PROXY_TYPE_DIRECT)
+	options[0].Value = uintptr(PROXY_TYPE_DIRECT) 
 
 	list := internetPerConnOptionList{
 		dwSize:        uint32(unsafe.Sizeof(internetPerConnOptionList{})),
