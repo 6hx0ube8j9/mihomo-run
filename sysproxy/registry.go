@@ -26,6 +26,10 @@ func NewProxyManager(cm *config.ConfigManager) *ProxyManager {
 }
 
 func (pm *ProxyManager) SetProxyRegistry(enable bool) {
+	if pm.cm.GetLastAppliedProxy() == enable {
+		return
+	}
+
 	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.SET_VALUE)
 	if err != nil {
 		return
@@ -41,19 +45,25 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		_ = key.SetDWordValue("ProxyEnable", 1)
 		_ = key.SetStringValue("ProxyServer", "127.0.0.1:"+port)
 		
-		bypass := "<local>;localhost;127.*;10.*;172.16.*;192.168.*"
+		bypass := "<local>;localhost;127.*;10.*;172.16.*;192.168.*;::1"
 		_ = key.SetStringValue("ProxyOverride", bypass)
 		
 		_ = key.DeleteValue("AutoConfigURL")
 
-		pm.cm.SaveJsonConfig("proxy", "true")
+		if !pm.cm.IsReallyExiting() {
+			pm.cm.SaveJsonConfig("proxy", "true")
+		}
 	} else {
 		_ = key.SetDWordValue("ProxyEnable", 0)
 		_ = key.DeleteValue("ProxyServer")
 		_ = key.DeleteValue("ProxyOverride")
 
-		pm.cm.SaveJsonConfig("proxy", "false")
+		if !pm.cm.IsReallyExiting() {
+			pm.cm.SaveJsonConfig("proxy", "false")
+		}
 	}
+
+	pm.cm.SetLastAppliedProxy(enable)
 
 	_, _, _ = setOption.Call(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
 	_, _, _ = setOption.Call(0, INTERNET_OPTION_REFRESH, 0, 0)
