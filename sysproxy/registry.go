@@ -55,7 +55,13 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		return
 	}
 	defer key.Close()
-
+	
+	currentEnable, _, err := key.GetIntegerValue("ProxyEnable")
+	realEnabled := (err == nil && currentEnable == 1)
+	
+	if pm.cm.GetLastAppliedProxy() == enable && realEnabled == enable {
+		return
+	}	
 	success := false
 
 	if enable {
