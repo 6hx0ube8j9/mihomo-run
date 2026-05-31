@@ -36,7 +36,6 @@ const debugPort = "52719"
 
 var tunKeywords = []string{"mihomo", "meta", "clash", "sing-box", "wintun"}
 
-// 🌟 新增：极低开销的内存复用池，压榨 GC 负担
 var bufPool = sync.Pool{
 	New: func() interface{} {
 		return bytes.NewBuffer(make([]byte, 0, 2048))
@@ -73,10 +72,9 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	var bodyReader io.Reader
 	var buf *bytes.Buffer
 
-	// 🌟 启用内存池机制
 	if payload != nil {
 		buf = bufPool.Get().(*bytes.Buffer)
-		buf.Reset() // 绝不串味
+		buf.Reset()
 		if err := json.NewEncoder(buf).Encode(payload); err != nil {
 			bufPool.Put(buf)
 			return nil, fmt.Errorf("marshal payload failed: %v", err)
@@ -450,13 +448,12 @@ func (tm *TrayManager) LaunchWebUI() {
 		}
 	}
 
-	// 🌟 优化：清空僵尸端口占用的绝对静默执行
 	if isPortOccupied {
 		killCmd := fmt.Sprintf("for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :%s ^| findstr LISTENING') do taskkill /F /PID %%a", debugPort)
 		cmd := exec.Command("cmd", "/c", killCmd)
 		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		_ = cmd.Run()
-		time.Sleep(150 * time.Millisecond) // 给操作系统释放句柄的缓冲时间
+		time.Sleep(150 * time.Millisecond)
 	}
 
 	var browserPath string
@@ -480,7 +477,6 @@ func (tm *TrayManager) LaunchWebUI() {
 		userDataDir := filepath.Join(tm.cm.BaseDir(), "webcache")
 		_ = os.MkdirAll(userDataDir, 0755)
 
-		// 🌟 引入纯函数进行动态 UI 缩放与居中
 		scrW := winapi.GetSystemMetrics(0)
 		scrH := winapi.GetSystemMetrics(1)
 		winW, winH, winX, winY := winapi.CalculateWindowBounds(scrW, scrH)
@@ -513,9 +509,8 @@ func (tm *TrayManager) LaunchWebUI() {
 	}
 }
 
-// 🌟 新增：优雅的标签页陪葬机制，防止孤儿窗口残留
 func (tm *TrayManager) CleanupWebUI() {
-	client := &http.Client{Timeout: 200 * time.Millisecond} // 极短超时，决不阻塞主程序退出
+	client := &http.Client{Timeout: 200 * time.Millisecond}
 	apiURL := fmt.Sprintf("http://127.0.0.1:%s/json", debugPort)
 	if resp, err := client.Get(apiURL); err == nil {
 		var targets []map[string]interface{}
@@ -669,7 +664,7 @@ func (tm *TrayManager) SetupTrayUI() {
 	mExit := systray.AddMenuItem("退出程序", "")
 	mExit.Click(func() {
 		tm.cm.MarkAsExiting()
-		tm.CleanupWebUI() // 🌟 退出前无感清场
+		tm.CleanupWebUI()
 		systray.Quit()
 	})
 }
