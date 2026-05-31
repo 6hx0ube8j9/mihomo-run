@@ -87,7 +87,6 @@ func RefreshInternetOptions() {
 	_, _, _ = setOption.Call(0, 39, 0, 0)
 }
 
-// CalculateWindowBounds 是一个纯函数，负责计算护眼自适应的窗口宽高和绝对居中坐标
 func CalculateWindowBounds(scrW, scrH int) (winW, winH, winX, winY int) {
 	winW, winH = 1280, 768
 	if scrW > 0 && scrH > 0 {
