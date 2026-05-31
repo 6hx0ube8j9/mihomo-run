@@ -66,9 +66,8 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		serverStr := "127.0.0.1:" + port
 
 		errServer := key.SetStringValue("ProxyServer", serverStr)
-		errEnable := key.SetDWordValue("ProxyEnable", 1)
-		
-		bypassStr := "<local>;localhost;127.*;10.*;172.16.*;192.168.*;::1"
+		errEnable := key.SetDWordValue("ProxyEnable", 1)	
+		bypassStr := "<local>;localhost;127.*;10.*;100.64.*;169.254.*;172.16.*;192.168.*"
 		errBypass := key.SetStringValue("ProxyOverride", bypassStr)
 		
 		errPac := key.DeleteValue("AutoConfigURL")
