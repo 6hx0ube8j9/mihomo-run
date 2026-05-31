@@ -1,131 +1,112 @@
 package sysproxy
 
 import (
-	"runtime"
-	"unsafe"
+	"errors"
+	"strconv"
+	"syscall"
 
 	"golang.org/x/sys/windows"
-
-	"mihomo-run/config"
-)
-
-var (
-	wininet   = windows.NewLazySystemDLL("wininet.dll")
-	setOption = wininet.NewProc("InternetSetOptionW")
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
-	INTERNET_OPTION_PER_CONNECTION_OPTION = 75
-	INTERNET_OPTION_SETTINGS_CHANGED      = 39
-	INTERNET_OPTION_REFRESH               = 37
-
-	PROXY_TYPE_DIRECT = 1
-	PROXY_TYPE_PROXY  = 2
-
-	INTERNET_PER_CONN_FLAGS        = 1
-	INTERNET_PER_CONN_PROXY_SERVER = 2
-	INTERNET_PER_CONN_PROXY_BYPASS = 3
+	REG_PROXY                        = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+	INTERNET_OPTION_SETTINGS_CHANGED = 39
+	INTERNET_OPTION_REFRESH          = 37
 )
 
-type internetPerConnOption struct {
-	dwOption uint32
-	Value    uintptr
+var (
+	modWininet         = windows.NewLazySystemDLL("wininet.dll")
+	procInternetSetOpt = modWininet.NewProc("InternetSetOptionW")
+)
+
+type ConfigInterface interface {
+	GetJsonConfig(key string) string
+	SaveJsonConfig(key, value string)
+	GetLastAppliedProxy() bool
+	SetLastAppliedProxy(enable bool)
+	SetProxyState(enable bool)
+	IsReallyExiting() bool
 }
 
-type internetPerConnOptionList struct {
-	dwSize        uint32
-	pszConnection *uint16
-	dwOptionCount uint32
-	dwOptionError uint32
-	pOptions      *internetPerConnOption
+type Win32APIInterface interface {
+	RefreshInternetOptions()
 }
 
 type ProxyManager struct {
-	cm *config.ConfigManager
+	cm  ConfigInterface
+	win Win32APIInterface
 }
 
-func NewProxyManager(cm *config.ConfigManager) *ProxyManager {
-	return &ProxyManager{cm: cm}
+func NewProxyManager(cm ConfigInterface, win Win32APIInterface) *ProxyManager {
+	return &ProxyManager{
+		cm:  cm,
+		win: win,
+	}
 }
 
 func (pm *ProxyManager) SetProxyRegistry(enable bool) {
+	if pm.cm.GetLastAppliedProxy() == enable {
+		return
+	}
+
+	key, err := registry.OpenKey(registry.CURRENT_USER, REG_PROXY, registry.SET_VALUE)
+	if err != nil {
+		return
+	}
+	defer key.Close()
+
+	success := false
+
 	if enable {
 		port := pm.cm.GetJsonConfig("port")
 		if port == "" || len(port) < 4 {
 			port = "7890"
 		}
-		server := "127.0.0.1:" + port
-		bypass := "<local>;localhost;127.*;10.*;172.16.*;192.168.*;::1"
-		setNativeProxy(server, bypass)
+		serverStr := "127.0.0.1:" + port
+
+		errServer := key.SetStringValue("ProxyServer", serverStr)
+		errEnable := key.SetDWordValue("ProxyEnable", 1)
 		
-		pm.cm.SaveJsonConfig("proxy", "true") 
+		bypassStr := "<local>;localhost;127.*;10.*;172.16.*;192.168.*;::1"
+		errBypass := key.SetStringValue("ProxyOverride", bypassStr)
+		
+		errPac := key.DeleteValue("AutoConfigURL")
+		if errPac != nil && !errors.Is(errPac, syscall.ERROR_FILE_NOT_FOUND) {
+		}
+
+		if errServer == nil && errEnable == nil && errBypass == nil {
+			success = true
+		} else {
+			_ = key.SetDWordValue("ProxyEnable", 0)
+		}
 	} else {
-		clearNativeProxy()
-		
-		pm.cm.SaveJsonConfig("proxy", "false")
+		errEnable := key.SetDWordValue("ProxyEnable", 0)
+
+		if errEnable == nil {
+			success = true
+		}
+	}
+
+	if success {
+		pm.cm.SetLastAppliedProxy(enable)
+		pm.cm.SetProxyState(enable)
+
+		if !pm.cm.IsReallyExiting() {
+			pm.cm.SaveJsonConfig("proxy", strconv.FormatBool(enable))
+		}
+
+		if pm.win != nil {
+			go func() {
+				pm.win.RefreshInternetOptions()
+			}()
+		}
 	}
 }
 
-func setNativeProxy(server, bypass string) {
-	options := make([]internetPerConnOption, 3)
+type Win32NotificationBridge struct{}
 
-	options[0].dwOption = INTERNET_PER_CONN_FLAGS
-	options[0].Value = uintptr(PROXY_TYPE_PROXY | PROXY_TYPE_DIRECT)
-
-	serverPtr, _ := windows.UTF16PtrFromString(server)
-	options[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER
-	options[1].Value = uintptr(unsafe.Pointer(serverPtr))
-
-	bypassPtr, _ := windows.UTF16PtrFromString(bypass)
-	options[2].dwOption = INTERNET_PER_CONN_PROXY_BYPASS
-	options[2].Value = uintptr(unsafe.Pointer(bypassPtr))
-
-	list := internetPerConnOptionList{
-		dwSize:        uint32(unsafe.Sizeof(internetPerConnOptionList{})),
-		pszConnection: nil,
-		dwOptionCount: 3,
-		dwOptionError: 0,
-		pOptions:      &options[0],
-	}
-
-	_, _, _ = setOption.Call(
-		0,
-		INTERNET_OPTION_PER_CONNECTION_OPTION,
-		uintptr(unsafe.Pointer(&list)),
-		uintptr(unsafe.Sizeof(list)),
-	)
-
-	_, _, _ = setOption.Call(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
-	_, _, _ = setOption.Call(0, INTERNET_OPTION_REFRESH, 0, 0)
-
-	runtime.KeepAlive(serverPtr)
-	runtime.KeepAlive(bypassPtr)
-	runtime.KeepAlive(options)
-}
-
-func clearNativeProxy() {
-	options := make([]internetPerConnOption, 1)
-
-	options[0].dwOption = INTERNET_PER_CONN_FLAGS
-	options[0].Value = uintptr(PROXY_TYPE_DIRECT)
-
-	list := internetPerConnOptionList{
-		dwSize:        uint32(unsafe.Sizeof(internetPerConnOptionList{})),
-		pszConnection: nil,
-		dwOptionCount: 1,
-		dwOptionError: 0,
-		pOptions:      &options[0],
-	}
-
-	_, _, _ = setOption.Call(
-		0,
-		INTERNET_OPTION_PER_CONNECTION_OPTION,
-		uintptr(unsafe.Pointer(&list)),
-		uintptr(unsafe.Sizeof(list)),
-	)
-
-	_, _, _ = setOption.Call(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
-	_, _, _ = setOption.Call(0, INTERNET_OPTION_REFRESH, 0, 0)
-
-	runtime.KeepAlive(options)
+func (w *Win32NotificationBridge) RefreshInternetOptions() {
+	_, _, _ = procInternetSetOpt.Call(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
+	_, _, _ = procInternetSetOpt.Call(0, INTERNET_OPTION_REFRESH, 0, 0)
 }
