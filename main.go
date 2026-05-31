@@ -52,7 +52,9 @@ func main() {
 	}
 
 	configMgr := config.NewConfigManager(baseDir, exePath)
-	proxyMgr := sysproxy.NewProxyManager(configMgr)
+
+	win32API := &sysproxy.Win32NotificationBridge{}
+	proxyMgr := sysproxy.NewProxyManager(configMgr, win32API)
 
 	kernelHooks := kernel.KernelHooks{
 		OnKernelStarted: func() {
