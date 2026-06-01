@@ -26,6 +26,7 @@ type ConfigInterface interface {
 	SaveJsonConfig(key, value string)
 	GetLastAppliedProxy() bool
 	SetLastAppliedProxy(enable bool)
+	GetProxyState() bool
 	SetProxyState(enable bool)
 	IsReallyExiting() bool
 }
@@ -136,7 +137,7 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 			return
 		}
 
-		expectedProxy := (pm.cm.GetJsonConfig("proxy") == "true")
+		expectedProxy := pm.cm.GetProxyState()
 
 		if !expectedProxy {
 			continue
