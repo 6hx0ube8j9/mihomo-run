@@ -101,9 +101,13 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		}
 
 		if pm.win != nil {
-			go func() {
+			if pm.cm.IsReallyExiting() {
 				pm.win.RefreshInternetOptions()
-			}()
+			} else {
+				go func() {
+					pm.win.RefreshInternetOptions()
+				}()
+			}
 		}
 	}
 }
@@ -114,6 +118,8 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		return
 	}
 	defer key.Close()
+
+	var retryCount int
 
 	for {
 		if pm.cm.IsReallyExiting() {
@@ -140,6 +146,7 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		expectedProxy := pm.cm.GetProxyState()
 
 		if !expectedProxy {
+			retryCount = 0
 			continue
 		}
 		
@@ -156,6 +163,7 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		isPortHijacked := (errStr == nil && serverStr != expectedServer)
 
 		if realProxy && isPortHijacked {
+			retryCount = 0
 			pm.cm.SetLastAppliedProxy(false)
 			pm.cm.SetProxyState(false)
 			pm.cm.SaveJsonConfig("proxy", "false")
@@ -163,9 +171,20 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		}
 
 		if !realProxy {
+			retryCount++
+			if retryCount > 3 {
+				pm.cm.SetLastAppliedProxy(false)
+				pm.cm.SetProxyState(false)
+				pm.cm.SaveJsonConfig("proxy", "false")
+				retryCount = 0
+				continue
+			}
+
 			time.Sleep(200 * time.Millisecond)
 			pm.cm.SetLastAppliedProxy(false)
 			pm.SetProxyRegistry(true)
+		} else {
+			retryCount = 0
 		}
 	}
 }
