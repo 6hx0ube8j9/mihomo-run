@@ -576,6 +576,7 @@ func (tm *TrayManager) SetupTrayUI() {
 		} else {
 			tm.mProxy.Uncheck()
 		}
+		tm.cm.SetProxyState(next)
 		go tm.pm.SetProxyRegistry(next)
 	})
 
