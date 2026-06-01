@@ -119,7 +119,6 @@ func main() {
 
 		proxyMgr.SetProxyRegistry(false)
 		systray.Quit()
-		time.Sleep(100 * time.Millisecond)
 	})
 }
 
