@@ -73,6 +73,9 @@ func (km *KernelManager) CloseJobObject() {
 }
 
 func (km *KernelManager) IsProcessRunning(name string) bool {
+	if strings.EqualFold(name, "mihomo.exe") && km.cm.IsKernelActive() {
+		return true
+	}
 	h, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil || h == windows.InvalidHandle {
 		return false
