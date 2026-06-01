@@ -36,6 +36,7 @@ type ConfigManager struct {
 	atomicProxyState             int32
 	atomicTunState               int32
 	lastClickTime                int64
+	isProxyWriting               int32
 }
 
 func NewConfigManager(baseDir, exePath string) *ConfigManager {
@@ -366,4 +367,16 @@ func (cm *ConfigManager) CheckAndThrottleClick(thresholdNano int64) bool {
 	}
 	atomic.StoreInt64(&cm.lastClickTime, now)
 	return true
+}
+
+func (cm *ConfigManager) IsProxyWriting() bool {
+	return atomic.LoadInt32(&cm.isProxyWriting) == 1
+}
+
+func (cm *ConfigManager) SetProxyWriting(val bool) {
+	var i int32
+	if val {
+		i = 1
+	}
+	atomic.StoreInt32(&cm.isProxyWriting, i)
 }
