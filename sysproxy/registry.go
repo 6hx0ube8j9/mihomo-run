@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -102,6 +103,68 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 			go func() {
 				pm.win.RefreshInternetOptions()
 			}()
+		}
+	}
+}
+
+func (pm *ProxyManager) WatchProxyRegistry() {
+	key, err := registry.OpenKey(registry.CURRENT_USER, REG_PROXY, registry.NOTIFY|registry.QUERY_VALUE)
+	if err != nil {
+		return
+	}
+	defer key.Close()
+
+	for {
+		if pm.cm.IsReallyExiting() {
+			return
+		}
+
+		err := windows.RegNotifyChangeKeyValue(
+			windows.Handle(key),
+			false,
+			windows.REG_NOTIFY_CHANGE_LAST_SET,
+			0,
+			false,
+		)
+
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if pm.cm.IsReallyExiting() {
+			return
+		}
+
+		expectedProxy := (pm.cm.GetJsonConfig("proxy") == "true")
+
+		if !expectedProxy {
+			continue
+		}
+		
+		val, _, err := key.GetIntegerValue("ProxyEnable")
+		realProxy := (err == nil && val == 1)
+
+		serverStr, _, errStr := key.GetStringValue("ProxyServer")
+		expectedPort := pm.cm.GetJsonConfig("port")
+		if expectedPort == "" || len(expectedPort) < 4 {
+			expectedPort = "7890"
+		}
+		expectedServer := "127.0.0.1:" + expectedPort
+		
+		isPortHijacked := (errStr == nil && serverStr != expectedServer)
+
+		if realProxy && isPortHijacked {
+			pm.cm.SetLastAppliedProxy(false)
+			pm.cm.SetProxyState(false)
+			pm.cm.SaveJsonConfig("proxy", "false")
+			continue
+		}
+
+		if !realProxy {
+			time.Sleep(200 * time.Millisecond)
+			pm.cm.SetLastAppliedProxy(false)
+			pm.SetProxyRegistry(true)
 		}
 	}
 }
