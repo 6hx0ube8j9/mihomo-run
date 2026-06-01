@@ -92,6 +92,7 @@ func main() {
 		go kernelMgr.MonitorKernelDaemon()
 		go trayMgr.MonitorIconState()
 		go trayMgr.WatchTunState()
+		go proxyMgr.WatchProxyRegistry()
 	}()
 
 	systray.Run(func() {
