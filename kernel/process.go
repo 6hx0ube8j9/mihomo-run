@@ -140,12 +140,11 @@ func (km *KernelManager) MonitorKernelDaemon() {
 		}
 
 		if km.IsProcessRunning("mihomo.exe") {
-			if !km.cm.IsKernelActive() {
-				km.KillProcessByName("mihomo.exe")
-				time.Sleep(300 * time.Millisecond)
-				continue
+			if km.cm.IsSystemInitializing() && !km.cm.IsSyncing() {
+				km.cm.SetSystemInitializing(false)
+				km.cm.SetHasFirstSynced(true)
 			}
-			time.Sleep(1 * time.Second)
+			time.Sleep(3 * time.Second)
 			continue
 		}
 
