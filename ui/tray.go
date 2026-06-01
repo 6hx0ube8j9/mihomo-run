@@ -567,7 +567,7 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	tm.mProxy = systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
 	tm.mProxy.Click(func() {
-		if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
+		if !tm.cm.CheckAndThrottleClick(int64(200 * time.Millisecond)) {
 			return
 		}
 		next := !tm.mProxy.Checked()
