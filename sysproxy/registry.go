@@ -29,6 +29,8 @@ type ConfigInterface interface {
 	GetProxyState() bool
 	SetProxyState(enable bool)
 	IsReallyExiting() bool
+	IsProxyWriting() bool
+	SetProxyWriting(val bool)
 }
 
 type Win32APIInterface interface {
@@ -53,7 +55,10 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 		return
 	}
 	defer key.Close()
-
+	
+    pm.cm.SetProxyWriting(true)
+	defer pm.cm.SetProxyWriting(false)
+	
 	currentEnable, _, err := key.GetIntegerValue("ProxyEnable")
 	realEnabled := (err == nil && currentEnable == 1)
 
@@ -143,6 +148,11 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 			return
 		}
 
+		if pm.cm.IsProxyWriting() {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}	
+			
 		expectedProxy := pm.cm.GetProxyState()
 
 		if !expectedProxy {
