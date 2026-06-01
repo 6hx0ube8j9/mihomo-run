@@ -48,6 +48,7 @@ type TrayManager struct {
 	pm         *sysproxy.ProxyManager
 	httpClient *http.Client
 	mTun       *systray.MenuItem
+	mProxy     *systray.MenuItem
 }
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
@@ -210,7 +211,14 @@ func (tm *TrayManager) MonitorIconState() {
 			if tm.cm.IsReallyExiting() {
 				return
 			}
-
+			if tm.mProxy != nil {
+				proxyIsOn := tm.cm.GetProxyState()
+				if proxyIsOn && !tm.mProxy.Checked() {
+					tm.mProxy.Check()
+				} else if !proxyIsOn && tm.mProxy.Checked() {
+					tm.mProxy.Uncheck()
+				}
+			}			
 			if !tm.km.IsProcessRunning("mihomo.exe") {
 				tm.cm.SetTunErrorCounter(0)
 				successCounter = 0
@@ -557,16 +565,16 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	systray.AddSeparator()
 
-	mProxy := systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
-    mProxy.Click(func() {
+	tm.mProxy = systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
+	tm.mProxy.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
 			return
 		}
-		next := !mProxy.Checked()
+		next := !tm.mProxy.Checked()
 		if next {
-			mProxy.Check()
+			tm.mProxy.Check()
 		} else {
-			mProxy.Uncheck()
+			tm.mProxy.Uncheck()
 		}
 		go tm.pm.SetProxyRegistry(next)
 	})
