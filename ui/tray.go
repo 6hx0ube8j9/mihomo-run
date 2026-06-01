@@ -690,10 +690,11 @@ func (tm *TrayManager) SetMihomoMode(mode string) {
 func (tm *TrayManager) SetTunMode(enable bool) {
 	newID := tm.cm.AddGlobalOpID()
 	tm.cm.SetSystemInitializing(true)
-	tm.cm.SaveJsonConfig("tun", strconv.FormatBool(enable))
 	tm.cm.SetTunState(enable)
 
 	go func(opID int32) {
+		tm.cm.SaveJsonConfig("tun", strconv.FormatBool(enable))
+		
 		defer func() {
 			if tm.cm.GetGlobalOpID() == opID {
 				tm.cm.SetSystemInitializing(false)
