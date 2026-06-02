@@ -29,13 +29,6 @@ import (
 	"mihomo-run/winapi"
 )
 
-const (
-	StateStop    = 0
-	StateError   = 1
-	StateTun     = 2
-	StateProxy   = 3
-	StateDefault = 4
-)
 //go:embed icons/*.ico
 var iconFs embed.FS
 
@@ -207,8 +200,8 @@ func (tm *TrayManager) CheckSystemState() int32 {
 	return 4
 }
 
-
-func (tm *TrayManager) WatchTunState() {
+func (tm *TrayManager) MonitorIconState() {
+	var successCounter int
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -218,71 +211,132 @@ func (tm *TrayManager) WatchTunState() {
 			if tm.cm.IsReallyExiting() {
 				return
 			}
+			if tm.mProxy != nil {
+				proxyIsOn := tm.cm.GetProxyState()
+				if proxyIsOn && !tm.mProxy.Checked() {
+					tm.mProxy.Check()
+				} else if !proxyIsOn && tm.mProxy.Checked() {
+					tm.mProxy.Uncheck()
+				}
+			}			
+			if !tm.km.IsProcessRunning("mihomo.exe") {
+				tm.cm.SetTunErrorCounter(0)
+				successCounter = 0
 
-			if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
-				tm.cm.UpdateTunAliveStatus(false)
-				continue
-			}
+				if tm.cm.GetLastState() != 0 {
+					tm.UpdateIconByState(0)
+					tm.cm.SetLastState(0)
+				}
+			} else {
+				curr := tm.CheckSystemState()
+				isTunModeInConfig := tm.cm.GetTunState()
+				isPhysicalLost := !tm.cm.IsTunInterfaceCurrentlyAlive()
+				isInitializing := tm.cm.IsSystemInitializing()
+				isCurrentlySyncing := tm.cm.IsSyncing()
 
-			currentHasTun := false
-			ifaces, err := net.Interfaces()
-			if err == nil {
-				for _, i := range ifaces {
-					lowerName := strings.ToLower(i.Name)
-					for _, k := range tunKeywords {
-						if strings.Contains(lowerName, k) {
-							currentHasTun = true
-							break
+				isBroken := (curr == 0) || (isTunModeInConfig && isPhysicalLost && !isInitializing && !isCurrentlySyncing)
+
+				if isBroken {
+					successCounter = 0
+					if tm.cm.GetTunErrorCounter() < 5 {
+						tm.cm.AddTunErrorCounter(1)
+					}
+
+					if tm.cm.GetTunErrorCounter() > 2 {
+						targetState := int32(1)
+						if curr == 0 {
+							targetState = 0
+						}
+
+						if tm.cm.GetLastState() != targetState {
+							tm.UpdateIconByState(int(targetState))
+							tm.cm.SetLastState(targetState)
 						}
 					}
-					if currentHasTun {
-						break
+				} else {
+					if isInitializing || isCurrentlySyncing {
+						successCounter = 0
+						if tm.cm.GetLastState() != curr {
+							tm.UpdateIconByState(int(curr))
+							tm.cm.SetLastState(curr)
+						}
+					} else {
+						successCounter++
+						currentErrCount := tm.cm.GetTunErrorCounter()
+
+						if currentErrCount <= 2 || successCounter >= 3 {
+							if successCounter >= 3 {
+								tm.cm.SetTunErrorCounter(0)
+							}
+
+							if tm.cm.GetLastState() != curr {
+								tm.UpdateIconByState(int(curr))
+								tm.cm.SetLastState(curr)
+							}
+						}
 					}
 				}
 			}
-
-			tm.cm.UpdateTunAliveStatus(currentHasTun)
 		}
 	}
 }
 
-func (tm *TrayManager) evaluateTargetState() int32 {
-	if !tm.cm.IsKernelActive() {
-		return StateStop
-	}
-
-	if tm.cm.IsTunInError(6*time.Second, 3*time.Second) {
-		return StateError
-	}
-
-	if tm.cm.GetTunState() && tm.cm.IsTunInterfaceCurrentlyAlive() {
-		return StateTun
-	}
-
-	if tm.cm.GetProxyState() {
-		return StateProxy
-	}
-
-	return StateDefault
-}
-
-func (tm *TrayManager) MonitorIconState() {
-	ticker := time.NewTicker(1 * time.Second)
+func (tm *TrayManager) WatchTunState() {
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
+	lastHasTun := false
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, i := range ifaces {
+			if tm.IsTunInterfaceMatch(i.Name) {
+				lastHasTun = true
+				break
+			}
+		}
+	}
+	tm.cm.SetTunInterfaceCurrentlyAlive(lastHasTun)
+
+	confirmCount := 0
 	for {
 		select {
 		case <-ticker.C:
 			if tm.cm.IsReallyExiting() {
 				return
 			}
-
-			targetState := tm.evaluateTargetState()
-
-			if tm.cm.GetLastState() != targetState {
-				tm.UpdateIconByState(int(targetState))
-				tm.cm.SetLastState(targetState)
+			if tm.cm.IsSystemInitializing() || tm.cm.IsSyncing() {
+				confirmCount = 0
+				continue
 			}
+
+			currentHasTun := false
+			currentIfaces, err := net.Interfaces()
+			if err != nil {
+				continue
+			}
+			for _, i := range currentIfaces {
+				if tm.IsTunInterfaceMatch(i.Name) {
+					currentHasTun = true
+					break
+				}
+			}
+
+			if currentHasTun != lastHasTun {
+				if currentHasTun {
+					lastHasTun = true
+					confirmCount = 0
+					tm.cm.SetTunInterfaceCurrentlyAlive(true)
+				} else {
+					confirmCount++
+					if confirmCount >= 2 {
+						lastHasTun = false
+						confirmCount = 0
+						tm.cm.SetTunInterfaceCurrentlyAlive(false)
+					}
+				}
+			} else {
+				confirmCount = 0
+			}
+			tm.cm.SetHasFirstSynced(true)
 		}
 	}
 }
