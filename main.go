@@ -1,13 +1,10 @@
 package main
 
 import (
-	"encoding/json"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/energye/systray"
 	"golang.org/x/sys/windows"
@@ -92,6 +89,7 @@ func main() {
 		go kernelMgr.MonitorKernelDaemon()
 		go trayMgr.MonitorIconState()
 		go trayMgr.WatchTunState()
+		go trayMgr.WatchCoreAPI() 
 		go proxyMgr.WatchProxyRegistry()
 	}()
 
@@ -100,23 +98,7 @@ func main() {
 		close(uiReady)
 	}, func() {
 		configMgr.MarkAsExiting()
-
-		client := &http.Client{Timeout: 500 * time.Millisecond}
-		apiURL := "http://127.0.0.1:52719/json"
-		if resp, err := client.Get(apiURL); err == nil {
-			var targets []map[string]interface{}
-			if json.NewDecoder(resp.Body).Decode(&targets) == nil {
-				for _, t := range targets {
-					if id, ok := t["id"].(string); ok {
-						if closeResp, closeErr := client.Get("http://127.0.0.1:52719/json/close/" + id); closeErr == nil {
-							_ = closeResp.Body.Close()
-						}
-					}
-				}
-			}
-			resp.Body.Close()
-		}
-
+		trayMgr.CleanupWebUI() 
 		proxyMgr.SetProxyRegistry(false)
 		systray.Quit()
 	})
