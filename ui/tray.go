@@ -42,6 +42,15 @@ var bufPool = sync.Pool{
 	},
 }
 
+// 定义状态机常量
+const (
+	StateStop    = 0
+	StateError   = 1
+	StateTun     = 2
+	StateProxy   = 3
+	StateDefault = 4
+)
+
 type TrayManager struct {
 	cm         *config.ConfigManager
 	km         *kernel.KernelManager
@@ -53,12 +62,162 @@ type TrayManager struct {
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
 	return &TrayManager{
-		cm: cm,
-		km: km,
-		pm: pm,
+		cm:         cm,
+		km:         km,
+		pm:         pm,
 		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
 	}
 }
+
+// ----------------------------------------------------
+// 🌟 第一部分：纯净的后台哨兵与探针 (新架构)
+// ----------------------------------------------------
+
+func (tm *TrayManager) WatchTunState() {
+	ticker := time.NewTicker(1 * time.Second) // 高频且轻量的物理探针
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if tm.cm.IsReallyExiting() {
+				return
+			}
+			if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
+				tm.cm.UpdateTunAliveStatus(false)
+				continue
+			}
+
+			currentHasTun := false
+			ifaces, err := net.Interfaces()
+			if err == nil {
+				for _, i := range ifaces {
+					if tm.IsTunInterfaceMatch(i.Name) {
+						currentHasTun = true
+						break
+					}
+				}
+			}
+			// 客观上报
+			tm.cm.UpdateTunAliveStatus(currentHasTun)
+		}
+	}
+}
+
+// WatchCoreAPI 从旧的 CheckSystemState 剥离出的纯粹数据反向同步哨兵
+func (tm *TrayManager) WatchCoreAPI() {
+	ticker := time.NewTicker(3 * time.Second) // 降低频率，不阻塞UI
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if tm.cm.IsReallyExiting() {
+				return
+			}
+			if !tm.cm.IsKernelActive() || tm.cm.IsSystemInitializing() || tm.cm.IsSyncing() {
+				continue
+			}
+
+			body, err := tm.DoAPIRequest("GET", "/configs", nil)
+			if err != nil {
+				continue
+			}
+
+			var currentConf struct {
+				Tun struct {
+					Enable bool `json:"enable"`
+				} `json:"tun"`
+				Mode string `json:"mode"`
+			}
+			if err := json.Unmarshal(body, &currentConf); err != nil {
+				continue
+			}
+
+			targetTunInJson := tm.cm.GetTunState()
+			realTunInConfig := tm.cm.GetJsonConfig("tun") == "true"
+
+			if currentConf.Tun.Enable != targetTunInJson && currentConf.Tun.Enable != realTunInConfig {
+				if currentConf.Tun.Enable {
+					tm.cm.SetTunState(true)
+					tm.cm.SaveJsonConfig("tun", "true")
+					if tm.mTun != nil && !tm.mTun.Checked() {
+						tm.mTun.Check()
+					}
+				} else {
+					tm.cm.SetTunState(false)
+					tm.cm.SaveJsonConfig("tun", "false")
+					if tm.mTun != nil && tm.mTun.Checked() {
+						tm.mTun.Uncheck()
+					}
+				}
+			}
+
+			targetModeInJson := tm.cm.GetCurrentModeState()
+			realModeInConfig := tm.cm.GetJsonConfig("mode")
+			if currentConf.Mode != "" && currentConf.Mode != targetModeInJson && currentConf.Mode != realModeInConfig {
+				tm.cm.SetCurrentModeState(currentConf.Mode)
+				tm.cm.SaveJsonConfig("mode", currentConf.Mode)
+			}
+		}
+	}
+}
+
+// ----------------------------------------------------
+// 🌟 第二部分：极简 UI 渲染器 (新架构)
+// ----------------------------------------------------
+
+func (tm *TrayManager) evaluateTargetState() int32 {
+	if !tm.km.IsProcessRunning("mihomo.exe") {
+		return StateStop
+	}
+	// 询问法官，6秒宽限期，3秒恢复防抖
+	if tm.cm.IsTunInError(6*time.Second, 3*time.Second) {
+		return StateError
+	}
+	if tm.cm.GetTunState() && tm.cm.IsTunInterfaceCurrentlyAlive() {
+		return StateTun
+	}
+	if tm.cm.GetProxyState() {
+		return StateProxy
+	}
+	return StateDefault
+}
+
+func (tm *TrayManager) MonitorIconState() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if tm.cm.IsReallyExiting() {
+				return
+			}
+			
+			// 维持你原本的 Proxy 菜单状态同步功能
+			if tm.mProxy != nil {
+				proxyIsOn := tm.cm.GetProxyState()
+				if proxyIsOn && !tm.mProxy.Checked() {
+					tm.mProxy.Check()
+				} else if !proxyIsOn && tm.mProxy.Checked() {
+					tm.mProxy.Uncheck()
+				}
+			}
+
+			targetState := tm.evaluateTargetState()
+
+			if tm.cm.GetLastState() != targetState {
+				tm.UpdateIconByState(int(targetState))
+				tm.cm.SetLastState(targetState)
+			}
+		}
+	}
+}
+
+// ----------------------------------------------------
+// 🌟 第三部分：保留的原汁原味核心逻辑 (绝不缺斤少两)
+// ----------------------------------------------------
 
 func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([]byte, error) {
 	apiAddr := strings.TrimSuffix(tm.cm.GetJsonConfig("external-controller"), "/")
@@ -131,214 +290,6 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 		return body, fmt.Errorf("API Error: %d, Response: %s", resp.StatusCode, string(body))
 	}
 	return body, nil
-}
-
-func (tm *TrayManager) CheckSystemState() int32 {
-	if !tm.km.IsProcessRunning("mihomo.exe") {
-		return 0
-	}
-	body, err := tm.DoAPIRequest("GET", "/configs", nil)
-	if err != nil {
-		if tm.cm.IsSystemInitializing() {
-			return tm.cm.GetLastState()
-		}
-		return 0
-	}
-
-	var currentConf struct {
-		Tun struct {
-			Enable bool `json:"enable"`
-		} `json:"tun"`
-		Mode string `json:"mode"`
-	}
-	if err := json.Unmarshal(body, &currentConf); err != nil {
-		return 0
-	}
-
-	targetTunInJson := tm.cm.GetTunState()
-	targetProxyInJson := tm.cm.GetProxyState()
-	targetModeInJson := tm.cm.GetCurrentModeState()
-
-	isInitializing := tm.cm.IsSystemInitializing()
-	if !isInitializing && !tm.cm.IsSyncing() {
-		realTunInConfig := tm.cm.GetJsonConfig("tun") == "true"
-		realModeInConfig := tm.cm.GetJsonConfig("mode")
-
-		if currentConf.Tun.Enable != targetTunInJson && currentConf.Tun.Enable != realTunInConfig {
-			if currentConf.Tun.Enable {
-				tm.cm.SetTunState(true)
-				tm.cm.SaveJsonConfig("tun", "true")
-				if tm.mTun != nil {
-					tm.mTun.Check()
-				}
-			} else {
-				tm.cm.SetTunState(false)
-				tm.cm.SaveJsonConfig("tun", "false")
-				if tm.mTun != nil {
-					tm.mTun.Uncheck()
-				}
-			}
-		}
-
-		if currentConf.Mode != "" && currentConf.Mode != targetModeInJson && currentConf.Mode != realModeInConfig {
-			tm.cm.SetCurrentModeState(currentConf.Mode)
-			tm.cm.SaveJsonConfig("mode", currentConf.Mode)
-		}
-	}
-
-	isTunActive := currentConf.Tun.Enable
-	if isInitializing {
-		isTunActive = targetTunInJson
-	}
-
-	if isTunActive {
-		return 2
-	}
-	if targetProxyInJson {
-		return 3
-	}
-	return 4
-}
-
-func (tm *TrayManager) MonitorIconState() {
-	var successCounter int
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if tm.cm.IsReallyExiting() {
-				return
-			}
-			if tm.mProxy != nil {
-				proxyIsOn := tm.cm.GetProxyState()
-				if proxyIsOn && !tm.mProxy.Checked() {
-					tm.mProxy.Check()
-				} else if !proxyIsOn && tm.mProxy.Checked() {
-					tm.mProxy.Uncheck()
-				}
-			}			
-			if !tm.km.IsProcessRunning("mihomo.exe") {
-				tm.cm.SetTunErrorCounter(0)
-				successCounter = 0
-
-				if tm.cm.GetLastState() != 0 {
-					tm.UpdateIconByState(0)
-					tm.cm.SetLastState(0)
-				}
-			} else {
-				curr := tm.CheckSystemState()
-				isTunModeInConfig := tm.cm.GetTunState()
-				isPhysicalLost := !tm.cm.IsTunInterfaceCurrentlyAlive()
-				isInitializing := tm.cm.IsSystemInitializing()
-				isCurrentlySyncing := tm.cm.IsSyncing()
-
-				isBroken := (curr == 0) || (isTunModeInConfig && isPhysicalLost && !isInitializing && !isCurrentlySyncing)
-
-				if isBroken {
-					successCounter = 0
-					if tm.cm.GetTunErrorCounter() < 5 {
-						tm.cm.AddTunErrorCounter(1)
-					}
-
-					if tm.cm.GetTunErrorCounter() > 2 {
-						targetState := int32(1)
-						if curr == 0 {
-							targetState = 0
-						}
-
-						if tm.cm.GetLastState() != targetState {
-							tm.UpdateIconByState(int(targetState))
-							tm.cm.SetLastState(targetState)
-						}
-					}
-				} else {
-					if isInitializing || isCurrentlySyncing {
-						successCounter = 0
-						if tm.cm.GetLastState() != curr {
-							tm.UpdateIconByState(int(curr))
-							tm.cm.SetLastState(curr)
-						}
-					} else {
-						successCounter++
-						currentErrCount := tm.cm.GetTunErrorCounter()
-
-						if currentErrCount <= 2 || successCounter >= 3 {
-							if successCounter >= 3 {
-								tm.cm.SetTunErrorCounter(0)
-							}
-
-							if tm.cm.GetLastState() != curr {
-								tm.UpdateIconByState(int(curr))
-								tm.cm.SetLastState(curr)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-func (tm *TrayManager) WatchTunState() {
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
-	lastHasTun := false
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, i := range ifaces {
-			if tm.IsTunInterfaceMatch(i.Name) {
-				lastHasTun = true
-				break
-			}
-		}
-	}
-	tm.cm.SetTunInterfaceCurrentlyAlive(lastHasTun)
-
-	confirmCount := 0
-	for {
-		select {
-		case <-ticker.C:
-			if tm.cm.IsReallyExiting() {
-				return
-			}
-			if tm.cm.IsSystemInitializing() || tm.cm.IsSyncing() {
-				confirmCount = 0
-				continue
-			}
-
-			currentHasTun := false
-			currentIfaces, err := net.Interfaces()
-			if err != nil {
-				continue
-			}
-			for _, i := range currentIfaces {
-				if tm.IsTunInterfaceMatch(i.Name) {
-					currentHasTun = true
-					break
-				}
-			}
-
-			if currentHasTun != lastHasTun {
-				if currentHasTun {
-					lastHasTun = true
-					confirmCount = 0
-					tm.cm.SetTunInterfaceCurrentlyAlive(true)
-				} else {
-					confirmCount++
-					if confirmCount >= 2 {
-						lastHasTun = false
-						confirmCount = 0
-						tm.cm.SetTunInterfaceCurrentlyAlive(false)
-					}
-				}
-			} else {
-				confirmCount = 0
-			}
-			tm.cm.SetHasFirstSynced(true)
-		}
-	}
 }
 
 func (tm *TrayManager) ReloadConfigFile() {
@@ -641,7 +592,7 @@ func (tm *TrayManager) SetupTrayUI() {
 	})
 
 	mRestart := mMoreRoot.AddSubMenuItem("重启内核", "")
-    mRestart.Click(func() {
+	mRestart.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(1000 * time.Millisecond)) {
 			return
 		}
@@ -720,7 +671,8 @@ func (tm *TrayManager) SetTunMode(enable bool) {
 				}
 			}
 			if found == enable {
-				tm.cm.SetTunInterfaceCurrentlyAlive(enable)
+				// 替换为新的状态汇报方法
+				tm.cm.UpdateTunAliveStatus(enable)
 				break
 			}
 			time.Sleep(200 * time.Millisecond)
