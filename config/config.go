@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,22 +20,23 @@ type ConfigManager struct {
 	currentModeState string
 	lastAppliedProxy bool
 
-	isSystemInitializing         int32
-	isSyncing                    int32
-	globalOpID                   int32
-	hasFirstSynced               int32
-	isKernelActive               int32
-	isFocusing                   int32
-	isReallyExiting              int32
-	isTunInterfaceCurrentlyAlive int32
-	configVersion                int32
-	lastWrittenVersion           int32
-	lastState                    int32
-	tunErrorCounter              int32
-	atomicProxyState             int32
-	atomicTunState               int32
-	lastClickTime                int64
-	isProxyWriting               int32
+	isSystemInitializing int32
+	isSyncing            int32
+	globalOpID           int32
+	hasFirstSynced       int32
+	isKernelActive       int32
+	isFocusing           int32
+	isReallyExiting      int32
+	tunStartTime     time.Time
+	tunAlive         bool
+	tunRecoveryStart time.Time
+	configVersion      int32
+	lastWrittenVersion int32
+	lastState          int32
+	atomicProxyState   int32
+	atomicTunState     int32
+	lastClickTime      int64
+	isProxyWriting     int32
 }
 
 func NewConfigManager(baseDir, exePath string) *ConfigManager {
@@ -121,6 +121,7 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 
 	if currentTun == "true" {
 		atomic.StoreInt32(&cm.atomicTunState, 1)
+		cm.tunStartTime = time.Now()
 	} else {
 		atomic.StoreInt32(&cm.atomicTunState, 0)
 	}
@@ -148,14 +149,16 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		case "tun":
 			if value == "true" {
 				atomic.StoreInt32(&cm.atomicTunState, 1)
+				cm.tunStartTime = time.Now()
 			} else {
 				atomic.StoreInt32(&cm.atomicTunState, 0)
+				cm.tunStartTime = time.Time{}
 			}
 		case "mode":
 			cm.currentModeState = value
 		}
 	}
-	
+
 	b, err := json.MarshalIndent(cm.configData, "", "  ")
 	if err != nil {
 		return
@@ -189,6 +192,49 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 
 	atomic.AddInt32(&cm.configVersion, 1)
 }
+
+func (cm *ConfigManager) UpdateTunAliveStatus(alive bool) {
+	cm.configMu.Lock()
+	defer cm.configMu.Unlock()
+	// 如果之前是死的，现在活了，记录下“恢复时间点”
+	if alive && !cm.tunAlive {
+		cm.tunRecoveryStart = time.Now()
+	}
+	cm.tunAlive = alive
+}
+
+func (cm *ConfigManager) IsTunInterfaceCurrentlyAlive() bool {
+	cm.configMu.RLock()
+	defer cm.configMu.RUnlock()
+	return cm.tunAlive
+}
+
+
+func (cm *ConfigManager) IsTunInError(gracePeriod, trustPeriod time.Duration) bool {
+	if cm.IsSystemInitializing() || cm.IsSyncing() || !cm.GetTunState() {
+		return false
+	}
+
+	cm.configMu.RLock()
+	start := cm.tunStartTime
+	alive := cm.tunAlive
+	recoveryStart := cm.tunRecoveryStart
+	cm.configMu.RUnlock()
+
+	if start.IsZero() {
+		return false
+	}
+
+	if alive {
+		if time.Since(start) > gracePeriod && time.Since(recoveryStart) < trustPeriod {
+			return true
+		}
+		return false
+	}
+
+	return time.Since(start) > gracePeriod
+}
+
 
 func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
 func (cm *ConfigManager) ExePath() string { return cm.exePath }
@@ -275,30 +321,6 @@ func (cm *ConfigManager) IsReallyExiting() bool {
 
 func (cm *ConfigManager) MarkAsExiting() {
 	atomic.StoreInt32(&cm.isReallyExiting, 1)
-}
-
-func (cm *ConfigManager) IsTunInterfaceCurrentlyAlive() bool {
-	return atomic.LoadInt32(&cm.isTunInterfaceCurrentlyAlive) == 1
-}
-
-func (cm *ConfigManager) SetTunInterfaceCurrentlyAlive(alive bool) {
-	var i int32
-	if alive {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isTunInterfaceCurrentlyAlive, i)
-}
-
-func (cm *ConfigManager) GetTunErrorCounter() int32 {
-	return atomic.LoadInt32(&cm.tunErrorCounter)
-}
-
-func (cm *ConfigManager) SetTunErrorCounter(val int32) {
-	atomic.StoreInt32(&cm.tunErrorCounter, val)
-}
-
-func (cm *ConfigManager) AddTunErrorCounter(delta int32) int32 {
-	return atomic.AddInt32(&cm.tunErrorCounter, delta)
 }
 
 func (cm *ConfigManager) GetLastState() int32 {
