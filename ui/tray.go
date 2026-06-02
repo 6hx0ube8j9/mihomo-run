@@ -571,13 +571,13 @@ func (tm *TrayManager) SetupTrayUI() {
 			return
 		}
 		next := !tm.mProxy.Checked()
-		if next { tm.mProxy.Check() } else { tm.mProxy.Uncheck() }
+		if next {
+			tm.mProxy.Check()
+		} else {
+			tm.mProxy.Uncheck()
+		}
 		tm.cm.SetProxyState(next)
-		go func() {
-		    if !tm.pm.IsAlreadyTargetState(next) {
-		        tm.pm.SetProxyRegistry(next)
-			}
-        }()
+		go tm.pm.SetProxyRegistry(next)
 	})
 
 	tm.mTun = systray.AddMenuItemCheckbox("虚拟网卡 (TUN)", "", initTunChecked)
