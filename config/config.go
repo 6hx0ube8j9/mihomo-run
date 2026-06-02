@@ -130,9 +130,10 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 
 func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 	cm.configMu.Lock()
+	defer cm.configMu.Unlock()
+
 	if key != "" {
 		if cm.configData[key] == value {
-			cm.configMu.Unlock()
 			return
 		}
 		cm.configData[key] = value
@@ -154,54 +155,39 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 			cm.currentModeState = value
 		}
 	}
-
-	dataCopy := make(map[string]string, len(cm.configData))
-	for k, v := range cm.configData {
-		dataCopy[k] = v
-	}
-	cm.configMu.Unlock()
-
-	b, err := json.Marshal(dataCopy)
+	
+	b, err := json.MarshalIndent(cm.configData, "", "  ")
 	if err != nil {
 		return
 	}
 
-	myVersion := atomic.AddInt32(&cm.configVersion, 1)
+	dir := cm.baseDir
+	if dir == "" {
+		dir = "."
+	}
 
-	go func(dataToWrite []byte, version int32) {
-		cfgPath := filepath.Join(cm.baseDir, CONFIG_FILE)
-		tmpPath := cfgPath + ".tmp." + strconv.FormatInt(int64(version), 10)
+	tmpFile, err := os.CreateTemp(dir, "mihomo-run-*.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+	}()
 
-		if err := os.WriteFile(tmpPath, dataToWrite, 0644); err == nil {
-			currentWritten := atomic.LoadInt32(&cm.lastWrittenVersion)
-			if version < currentWritten {
-				_ = os.Remove(tmpPath)
-				return
-			}
-			for {
-				current := atomic.LoadInt32(&cm.lastWrittenVersion)
-				if version <= current {
-					_ = os.Remove(tmpPath)
-					return
-				}
-				if atomic.CompareAndSwapInt32(&cm.lastWrittenVersion, current, version) {
-					break
-				}
-			}
+	if _, err := tmpFile.Write(b); err != nil {
+		return
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return
+	}
+	_ = tmpFile.Close()
 
-			var renameErr error
-			for i := 0; i < 3; i++ {
-				renameErr = os.Rename(tmpPath, cfgPath)
-				if renameErr == nil {
-					break
-				}
-				time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
-			}
-			if renameErr != nil {
-				_ = os.Remove(tmpPath)
-			}
-		}
-	}(b, myVersion)
+	targetPath := filepath.Join(cm.baseDir, CONFIG_FILE)
+	_ = os.Rename(tmpName, targetPath)
+
+	atomic.AddInt32(&cm.configVersion, 1)
 }
 
 func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
