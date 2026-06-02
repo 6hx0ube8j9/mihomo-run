@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -31,6 +32,25 @@ type KernelManager struct {
 	hJob  windows.Handle
 	cm    ConfigContextInterface
 	hooks KernelHooks
+	currentPid uint32
+}
+
+func (km *KernelManager) isPidRunning(pid uint32) bool {
+	if pid == 0 {
+		return false
+	}
+	h, err := windows.OpenProcess(0x1000, false, pid)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(h)
+
+	var exitCode uint32
+	err = windows.GetExitCodeProcess(h, &exitCode)
+	if err != nil {
+		return false
+	}
+	return exitCode == 259
 }
 
 func NewKernelManager(cm ConfigContextInterface, hooks KernelHooks) *KernelManager {
@@ -142,7 +162,8 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			return
 		}
 
-		if km.IsProcessRunning("mihomo.exe") {
+		localPid := atomic.LoadUint32(&km.currentPid)
+		if localPid != 0 && km.isPidRunning(localPid) {
 			if km.cm.IsSystemInitializing() && !km.cm.IsSyncing() {
 				km.cm.SetSystemInitializing(false)
 				km.cm.SetHasFirstSynced(true)
@@ -154,7 +175,6 @@ func (km *KernelManager) MonitorKernelDaemon() {
 		km.cm.SetSystemInitializing(true)
 		km.cm.SetHasFirstSynced(false)
 		km.cm.SetKernelActive(false)
-
 		km.KillProcessByName("mihomo.exe")
 		time.Sleep(300 * time.Millisecond)
 
@@ -170,7 +190,9 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			continue
 		}
 
+		atomic.StoreUint32(&km.currentPid, uint32(cmd.Process.Pid))
 		km.cm.SetKernelActive(true)
+		
 		if km.hooks.OnKernelStarted != nil {
 			km.hooks.OnKernelStarted()
 		}
@@ -212,6 +234,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 
 		ticker.Stop()
 		km.cm.SetKernelActive(false)
+		atomic.StoreUint32(&km.currentPid, 0)
 		time.Sleep(1 * time.Second)
 	}
 }
