@@ -163,25 +163,27 @@ func (tm *TrayManager) WatchCoreAPI() {
 	}
 }
 
-// ----------------------------------------------------
-// 🌟 第二部分：极简 UI 渲染器 (新架构)
-// ----------------------------------------------------
-
 func (tm *TrayManager) evaluateTargetState() int32 {
-	if !tm.km.IsProcessRunning("mihomo.exe") {
+	if !tm.cm.IsKernelActive() {
 		return StateStop
 	}
-	// 询问法官，6秒宽限期，3秒恢复防抖
-	if tm.cm.IsTunInError(6*time.Second, 3*time.Second) {
-		return StateError
+
+	wantTun := tm.cm.GetJsonConfig("tun") == "true"
+	wantProxy := tm.cm.GetJsonConfig("proxy") == "true"
+	
+	if !wantTun {
+		if wantProxy {
+			return StateProxy
+		}
+		return StateDefault
 	}
-	if tm.cm.GetTunState() && tm.cm.IsTunInterfaceCurrentlyAlive() {
+	if tm.cm.IsTunAlive() {
 		return StateTun
 	}
-	if tm.cm.GetProxyState() {
-		return StateProxy
+	if time.Since(tm.cm.GetTunStartTime()) < 8*time.Second {
+		return StateTun
 	}
-	return StateDefault
+	return StateError
 }
 
 func (tm *TrayManager) MonitorIconState() {
@@ -195,7 +197,6 @@ func (tm *TrayManager) MonitorIconState() {
 				return
 			}
 			
-			// 维持你原本的 Proxy 菜单状态同步功能
 			if tm.mProxy != nil {
 				proxyIsOn := tm.cm.GetProxyState()
 				if proxyIsOn && !tm.mProxy.Checked() {
@@ -215,9 +216,6 @@ func (tm *TrayManager) MonitorIconState() {
 	}
 }
 
-// ----------------------------------------------------
-// 🌟 第三部分：保留的原汁原味核心逻辑 (绝不缺斤少两)
-// ----------------------------------------------------
 
 func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([]byte, error) {
 	apiAddr := strings.TrimSuffix(tm.cm.GetJsonConfig("external-controller"), "/")
