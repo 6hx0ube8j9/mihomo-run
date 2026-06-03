@@ -159,7 +159,7 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 		}
 	}
 
-	b, err := json.MarshalIndent(cm.configData, "", "  ")
+	b, err := json.Marshal(cm.configData)
 	if err != nil {
 		return
 	}
