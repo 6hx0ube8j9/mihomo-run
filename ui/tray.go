@@ -105,7 +105,7 @@ func (tm *TrayManager) WatchTunState() {
 }
 
 func (tm *TrayManager) WatchCoreAPI() {
-	ticker := time.NewTicker(3 * time.Second) // 降低频率，不阻塞UI
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -310,6 +310,7 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 }
 
 func (tm *TrayManager) ReloadConfigFile() {
+    tm.cm.SetSyncing(true)
 	tm.cm.SetSystemInitializing(true)
 	isProxyEnabled := tm.cm.GetProxyState()
 
@@ -321,9 +322,11 @@ func (tm *TrayManager) ReloadConfigFile() {
 	tm.SniffAndSolidifyConfig()
 
 	go func() {
-		defer tm.cm.SetSystemInitializing(false)
-		time.Sleep(200 * time.Millisecond)
-
+	    defer func() {
+		    tm.cm.SetSystemInitializing(false)
+			tm.cm.SetSyncing(false)
+		}()
+		
 		isTunOn := tm.cm.GetJsonConfig("tun") == "true"
 		modeStr := tm.cm.GetJsonConfig("mode")
 
