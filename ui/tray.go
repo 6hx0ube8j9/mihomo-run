@@ -163,13 +163,6 @@ func (tm *TrayManager) WatchCoreAPI() {
 }
 
 func (tm *TrayManager) evaluateTargetState() int32 {
-	if tm.cm.IsSyncing() {
-		last := tm.cm.GetLastState()
-		if last != -1 {
-			return last
-		}
-	}
-
 	if !tm.cm.IsKernelActive() {
 		return StateStop
 	}
