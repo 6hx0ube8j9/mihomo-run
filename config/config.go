@@ -194,13 +194,9 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 }
 
 func (cm *ConfigManager) UpdateTunAliveStatus(alive bool) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	// 如果之前是死的，现在活了，记录下“恢复时间点”
-	if alive && !cm.tunAlive {
-		cm.tunRecoveryStart = time.Now()
-	}
-	cm.tunAlive = alive
+    cm.configMu.Lock()
+    defer cm.configMu.Unlock()
+    cm.tunAlive = alive
 }
 
 func (cm *ConfigManager) IsTunInterfaceCurrentlyAlive() bool {
@@ -208,33 +204,6 @@ func (cm *ConfigManager) IsTunInterfaceCurrentlyAlive() bool {
 	defer cm.configMu.RUnlock()
 	return cm.tunAlive
 }
-
-
-func (cm *ConfigManager) IsTunInError(gracePeriod, trustPeriod time.Duration) bool {
-	if cm.IsSystemInitializing() || cm.IsSyncing() || !cm.GetTunState() {
-		return false
-	}
-
-	cm.configMu.RLock()
-	start := cm.tunStartTime
-	alive := cm.tunAlive
-	recoveryStart := cm.tunRecoveryStart
-	cm.configMu.RUnlock()
-
-	if start.IsZero() {
-		return false
-	}
-
-	if alive {
-		if time.Since(start) > gracePeriod && time.Since(recoveryStart) < trustPeriod {
-			return true
-		}
-		return false
-	}
-
-	return time.Since(start) > gracePeriod
-}
-
 
 func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
 func (cm *ConfigManager) ExePath() string { return cm.exePath }
