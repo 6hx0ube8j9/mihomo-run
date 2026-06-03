@@ -21,6 +21,7 @@ type ConfigContextInterface interface {
 	SetHasFirstSynced(val bool)
 	SetKernelActive(active bool)
 	IsKernelActive() bool
+	SetTunStartTime(t time.Time)
 }
 
 type KernelHooks struct {
@@ -191,6 +192,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 		}
 
 		atomic.StoreUint32(&km.currentPid, uint32(cmd.Process.Pid))
+		km.cm.SetTunStartTime(time.Now())
 		km.cm.SetKernelActive(true)
 		
 		if km.hooks.OnKernelStarted != nil {
