@@ -178,6 +178,7 @@ func (tm *TrayManager) evaluateTargetState() int32 {
 	wantProxy := tm.cm.GetJsonConfig("proxy") == "true"
 
 	if !wantTun {
+		tm.cm.SetTunRecoveryStart(time.Time{})
 		if wantProxy {
 			return StateProxy
 		}
@@ -185,11 +186,29 @@ func (tm *TrayManager) evaluateTargetState() int32 {
 	}
 
 	if tm.cm.IsTunAlive() {
+		tm.cm.SetTunRecoveryStart(time.Time{})
 		return StateTun
 	}
 	if time.Since(tm.cm.GetTunStartTime()) < 8*time.Second {
 		return StateTun
 	}
+
+	recoveryStart := tm.cm.GetTunRecoveryStart()
+	if recoveryStart.IsZero() {
+		tm.cm.SetTunRecoveryStart(time.Now())
+		if last := tm.cm.GetLastState(); last != -1 {
+			return last
+		}
+		return StateTun
+	}
+	
+	if time.Since(recoveryStart) < 3*time.Second {
+		if last := tm.cm.GetLastState(); last != -1 {
+			return last
+		}
+		return StateTun
+	}
+
 	return StateError
 }
 
