@@ -104,7 +104,6 @@ func (tm *TrayManager) WatchTunState() {
 	}
 }
 
-// WatchCoreAPI 从旧的 CheckSystemState 剥离出的纯粹数据反向同步哨兵
 func (tm *TrayManager) WatchCoreAPI() {
 	ticker := time.NewTicker(3 * time.Second) // 降低频率，不阻塞UI
 	defer ticker.Stop()
@@ -164,19 +163,27 @@ func (tm *TrayManager) WatchCoreAPI() {
 }
 
 func (tm *TrayManager) evaluateTargetState() int32 {
+	if tm.cm.IsSyncing() {
+		last := tm.cm.GetLastState()
+		if last != -1 {
+			return last
+		}
+	}
+
 	if !tm.cm.IsKernelActive() {
 		return StateStop
 	}
 
 	wantTun := tm.cm.GetJsonConfig("tun") == "true"
 	wantProxy := tm.cm.GetJsonConfig("proxy") == "true"
-	
+
 	if !wantTun {
 		if wantProxy {
 			return StateProxy
 		}
 		return StateDefault
 	}
+
 	if tm.cm.IsTunAlive() {
 		return StateTun
 	}
