@@ -310,23 +310,18 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 }
 
 func (tm *TrayManager) ReloadConfigFile() {
-    tm.cm.SetSyncing(true)
+	tm.cm.SetSyncing(true)
 	tm.cm.SetSystemInitializing(true)
 	isProxyEnabled := tm.cm.GetProxyState()
-
-	if isProxyEnabled {
-		tm.pm.SetProxyRegistry(false)
-	}
-
 	_, _ = tm.DoAPIRequest("PUT", "/configs?force=true", nil)
 	tm.SniffAndSolidifyConfig()
 
 	go func() {
-	    defer func() {
-		    tm.cm.SetSystemInitializing(false)
+		defer func() {
+			tm.cm.SetSystemInitializing(false)
 			tm.cm.SetSyncing(false)
 		}()
-		
+
 		isTunOn := tm.cm.GetJsonConfig("tun") == "true"
 		modeStr := tm.cm.GetJsonConfig("mode")
 
@@ -334,6 +329,7 @@ func (tm *TrayManager) ReloadConfigFile() {
 		tm.cm.SetCurrentModeState(modeStr)
 
 		if isProxyEnabled {
+			tm.cm.SetLastAppliedProxy(false)
 			tm.pm.SetProxyRegistry(true)
 		}
 
