@@ -411,3 +411,15 @@ func (cm *ConfigManager) SetTunAlive(alive bool) {
 	defer cm.configMu.Unlock()
 	cm.tunAlive = alive
 }
+
+func (cm *ConfigManager) GetTunRecoveryStart() time.Time {
+	cm.configMu.RLock()
+	defer cm.configMu.RUnlock()
+	return cm.tunRecoveryStart
+}
+
+func (cm *ConfigManager) SetTunRecoveryStart(t time.Time) {
+	cm.configMu.Lock()
+	defer cm.configMu.Unlock()
+	cm.tunRecoveryStart = t
+}
