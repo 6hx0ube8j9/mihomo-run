@@ -388,3 +388,26 @@ func (cm *ConfigManager) SetProxyWriting(val bool) {
 	}
 	atomic.StoreInt32(&cm.isProxyWriting, i)
 }
+func (cm *ConfigManager) GetTunStartTime() time.Time {
+	cm.configMu.RLock()
+	defer cm.configMu.RUnlock()
+	return cm.tunStartTime
+}
+
+func (cm *ConfigManager) SetTunStartTime(t time.Time) {
+	cm.configMu.Lock()
+	defer cm.configMu.Unlock()
+	cm.tunStartTime = t
+}
+
+func (cm *ConfigManager) IsTunAlive() bool {
+	cm.configMu.RLock()
+	defer cm.configMu.RUnlock()
+	return cm.tunAlive
+}
+
+func (cm *ConfigManager) SetTunAlive(alive bool) {
+	cm.configMu.Lock()
+	defer cm.configMu.Unlock()
+	cm.tunAlive = alive
+}
