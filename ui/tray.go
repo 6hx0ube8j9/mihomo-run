@@ -101,8 +101,8 @@ func (tm *TrayManager) WatchTunState() {
 		
 		if !currentHasTun {
 			failCount++
-			if failCount > 5 {
-				sleepDuration = 3 * time.Second
+			if failCount > 3 {
+				sleepDuration = 2 * time.Second
 			}
 		} else {
 			failCount = 0 
@@ -273,6 +273,10 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 		}
 		return nil, err
 	}
+	
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}		
 
 	secret := tm.cm.GetJsonConfig("secret")
 	if secret != "" {
