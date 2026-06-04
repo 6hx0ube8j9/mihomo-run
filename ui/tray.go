@@ -69,46 +69,34 @@ func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysp
 	}
 }
 
+
 func (tm *TrayManager) WatchTunState() {
-	var failCount int
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
 	for {
-		if tm.cm.IsReallyExiting() {
-			return
-		}
+		select {
+		case <-ticker.C:
+			if tm.cm.IsReallyExiting() {
+				return
+			}
+			if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
+				tm.cm.UpdateTunAliveStatus(false)
+				continue
+			}
 
-		if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
-			tm.cm.UpdateTunAliveStatus(false)
-			failCount = 0 
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		currentHasTun := false
-		
-		ifaces, err := net.Interfaces()
-		if err == nil {
-			for _, i := range ifaces {
-				if tm.IsTunInterfaceMatch(i.Name) {
-					currentHasTun = true
-					break
+			currentHasTun := false
+			ifaces, err := net.Interfaces()
+			if err == nil {
+				for _, i := range ifaces {
+					if tm.IsTunInterfaceMatch(i.Name) {
+						currentHasTun = true
+						break
+					}
 				}
 			}
+			tm.cm.UpdateTunAliveStatus(currentHasTun)
 		}
-		
-		tm.cm.UpdateTunAliveStatus(currentHasTun)
-		sleepDuration := 1 * time.Second
-		
-		if !currentHasTun {
-			failCount++
-			if failCount > 3 {
-				sleepDuration = 2 * time.Second
-			}
-		} else {
-			failCount = 0 
-		}
-
-		time.Sleep(sleepDuration)
 	}
 }
 
@@ -242,6 +230,7 @@ func (tm *TrayManager) MonitorIconState() {
 		}
 	}
 }
+
 
 func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([]byte, error) {
 	apiAddr := strings.TrimSuffix(tm.cm.GetJsonConfig("external-controller"), "/")
