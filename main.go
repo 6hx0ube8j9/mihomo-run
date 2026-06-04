@@ -1,54 +1,122 @@
-//go:build windows
-
 package main
 
 import (
 	"os"
+	"os/signal"
+	"path/filepath"
 	"syscall"
-	"time"
 
-	"pinswitch/core"
-	"pinswitch/ui"
-	"pinswitch/winapi"
+	"github.com/energye/systray"
+	"golang.org/x/sys/windows"
+
+	"mihomo-run/config"
+	"mihomo-run/kernel"
+	"mihomo-run/sysproxy"
+	"mihomo-run/ui"
 )
 
+const APP_MUTEX = "Mihomo_Unique_Mutex"
+
 func main() {
-	isRestart := len(os.Args) > 1 && os.Args[1] == "-restart"
-	if isRestart {
-		time.Sleep(200 * time.Millisecond)
+	exePath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	baseDir := filepath.Dir(exePath)
+	_ = os.Chdir(baseDir)
+
+	mName, _ := windows.UTF16PtrFromString(APP_MUTEX)
+	hM, err := windows.CreateMutex(nil, false, mName)
+	if err != nil || windows.GetLastError() == windows.ERROR_ALREADY_EXISTS {
+		if hM != 0 {
+			windows.CloseHandle(hM)
+		}
+		return
+	}
+	defer windows.CloseHandle(hM)
+
+	isAutostart := false
+	for _, arg := range os.Args {
+		if arg == "---autostart" {
+			isAutostart = true
+			break
+		}
 	}
 
-	ret, err := winapi.CreateMutex("Local\\PinswitchUniqueMutexSecure")
-	if err == syscall.Errno(183) {
-		if isRestart {
-			return
-		}
+	if !isAdmin() && !isAutostart {
+		runAsAdmin(exePath, baseDir)
+		return
+	}
 
-		oldHwnd := winapi.FindWindow("PinswitchHotkeyWindow_Unique_Class")
-		if oldHwnd != 0 {
-			if winapi.GetAsyncKeyState(0x10) {
-				winapi.PostMessage(oldHwnd, winapi.WM_USER+778, 0, 0)
-			} else {
-				winapi.PostMessage(oldHwnd, winapi.WM_USER+777, 0, 0)
+	configMgr := config.NewConfigManager(baseDir, exePath)
+
+	win32API := &sysproxy.Win32NotificationBridge{}
+	proxyMgr := sysproxy.NewProxyManager(configMgr, win32API)
+
+	kernelHooks := kernel.KernelHooks{
+		OnKernelStarted: func() {
+			trayTemp := ui.NewTrayManager(configMgr, nil, nil)
+			trayTemp.SniffAndSolidifyConfig()
+		},
+		OnKernelReady: func() {
+			trayTemp := ui.NewTrayManager(configMgr, nil, proxyMgr)
+			trayTemp.SyncConfigToKernel()
+
+			if configMgr.GetJsonConfig("proxy") == "true" {
+				configMgr.SetLastAppliedProxy(false)
+				proxyMgr.SetProxyRegistry(true)
 			}
-		}
-		return
-	} else if ret == 0 {
-		return
+		},
 	}
 
-	defer func() {
-		if ret != 0 {
-			winapi.CloseHandle(syscall.Handle(ret))
-		}
+	kernelMgr := kernel.NewKernelManager(configMgr, kernelHooks)
+	kernelMgr.InitJobObject()
+	defer kernelMgr.CloseJobObject()
+
+	trayMgr := ui.NewTrayManager(configMgr, kernelMgr, proxyMgr)
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		systray.Quit()
 	}()
 
-	engine := core.NewSwitchEngine()
+	uiReady := make(chan struct{})
 
-	if engine.IsTrayHidden() {
-		ui.RunHeadless(engine)
-	} else {
-		tray := ui.NewTrayUI(engine)
-		tray.Start()
+	go func() {
+		<-uiReady
+		go kernelMgr.MonitorKernelDaemon()
+		go trayMgr.MonitorIconState()
+		go trayMgr.WatchTunState()
+		go trayMgr.WatchCoreAPI() 
+		go proxyMgr.WatchProxyRegistry()
+	}()
+
+	systray.Run(func() {
+		trayMgr.SetupTrayUI()
+		close(uiReady)
+	}, func() {
+		configMgr.MarkAsExiting()
+		trayMgr.CleanupWebUI() 
+		proxyMgr.SetProxyRegistry(false)
+		systray.Quit()
+	})
+}
+
+func isAdmin() bool {
+	var token windows.Token
+	err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token)
+	if err != nil {
+		return false
 	}
+	defer token.Close()
+	return token.IsElevated()
+}
+
+func runAsAdmin(exe, dir string) {
+	verb, _ := syscall.UTF16PtrFromString("runas")
+	exePtr, _ := syscall.UTF16PtrFromString(exe)
+	cwdPtr, _ := syscall.UTF16PtrFromString(dir)
+	_ = windows.ShellExecute(0, verb, exePtr, nil, cwdPtr, windows.SW_SHOWNORMAL)
 }
