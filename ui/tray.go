@@ -69,38 +69,46 @@ func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysp
 	}
 }
 
-// ----------------------------------------------------
-// 🌟 第一部分：纯净的后台哨兵与探针 (新架构)
-// ----------------------------------------------------
-
 func (tm *TrayManager) WatchTunState() {
-	ticker := time.NewTicker(1 * time.Second) // 高频且轻量的物理探针
-	defer ticker.Stop()
+	var failCount int
 
 	for {
-		select {
-		case <-ticker.C:
-			if tm.cm.IsReallyExiting() {
-				return
-			}
-			if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
-				tm.cm.UpdateTunAliveStatus(false)
-				continue
-			}
+		if tm.cm.IsReallyExiting() {
+			return
+		}
 
-			currentHasTun := false
-			ifaces, err := net.Interfaces()
-			if err == nil {
-				for _, i := range ifaces {
-					if tm.IsTunInterfaceMatch(i.Name) {
-						currentHasTun = true
-						break
-					}
+		if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
+			tm.cm.UpdateTunAliveStatus(false)
+			failCount = 0 
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		currentHasTun := false
+		
+		ifaces, err := net.Interfaces()
+		if err == nil {
+			for _, i := range ifaces {
+				if tm.IsTunInterfaceMatch(i.Name) {
+					currentHasTun = true
+					break
 				}
 			}
-			// 客观上报
-			tm.cm.UpdateTunAliveStatus(currentHasTun)
 		}
+		
+		tm.cm.UpdateTunAliveStatus(currentHasTun)
+		sleepDuration := 1 * time.Second
+		
+		if !currentHasTun {
+			failCount++
+			if failCount > 5 {
+				sleepDuration = 3 * time.Second
+			}
+		} else {
+			failCount = 0 
+		}
+
+		time.Sleep(sleepDuration)
 	}
 }
 
@@ -235,7 +243,6 @@ func (tm *TrayManager) MonitorIconState() {
 	}
 }
 
-
 func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([]byte, error) {
 	apiAddr := strings.TrimSuffix(tm.cm.GetJsonConfig("external-controller"), "/")
 	if apiAddr == "" {
@@ -254,59 +261,49 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 		buf.Reset()
 		if err := json.NewEncoder(buf).Encode(payload); err != nil {
 			bufPool.Put(buf)
-			return nil, fmt.Errorf("marshal payload failed: %v", err)
+			return nil, err
 		}
 		bodyReader = buf
-	} else if method == "PUT" || method == "POST" || method == "PATCH" {
-		bodyReader = bytes.NewReader([]byte("{}"))
 	}
-
-	defer func() {
-		if buf != nil {
-			bufPool.Put(buf)
-		}
-	}()
 
 	req, err := http.NewRequest(method, url, bodyReader)
 	if err != nil {
+		if buf != nil {
+			bufPool.Put(buf)
+		}
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	if secret := tm.cm.GetJsonConfig("secret"); secret != "" {
+	secret := tm.cm.GetJsonConfig("secret")
+	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 
 	resp, err := tm.httpClient.Do(req)
+	
+	if buf != nil {
+		bufPool.Put(buf)
+	}
+
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
-	if resp.StatusCode == 204 || resp.ContentLength == 0 {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("API Status Error: %d", resp.StatusCode)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	capacity := int64(512)
-	if resp.ContentLength > 0 {
-		capacity = resp.ContentLength
-	}
-	outBuf := bytes.NewBuffer(make([]byte, 0, capacity))
-
-	limitReader := io.LimitReader(resp.Body, 10*1024*1024)
-	if _, err := io.Copy(outBuf, limitReader); err != nil {
-		return nil, fmt.Errorf("read response body failed: %v", err)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error: %s", string(respBody))
 	}
 
-	body := outBuf.Bytes()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return body, fmt.Errorf("API Error: %d, Response: %s", resp.StatusCode, string(body))
-	}
-	return body, nil
+	return respBody, nil
 }
 
 func (tm *TrayManager) ReloadConfigFile() {
