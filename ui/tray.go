@@ -261,53 +261,59 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 		buf.Reset()
 		if err := json.NewEncoder(buf).Encode(payload); err != nil {
 			bufPool.Put(buf)
-			return nil, err
+			return nil, fmt.Errorf("marshal payload failed: %v", err)
 		}
 		bodyReader = buf
+	} else if method == "PUT" || method == "POST" || method == "PATCH" {
+		bodyReader = bytes.NewReader([]byte("{}"))
 	}
 
-	req, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
+	defer func() {
 		if buf != nil {
 			bufPool.Put(buf)
 		}
+	}()
+
+	req, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
 		return nil, err
 	}
-	
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}		
 
-	secret := tm.cm.GetJsonConfig("secret")
-	if secret != "" {
+	req.Header.Set("Content-Type", "application/json")
+	if secret := tm.cm.GetJsonConfig("secret"); secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 
 	resp, err := tm.httpClient.Do(req)
-	
-	if buf != nil {
-		bufPool.Put(buf)
-	}
-
 	if err != nil {
 		return nil, err
 	}
-	
-	defer func() {
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}()
+	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	if resp.StatusCode == 204 || resp.ContentLength == 0 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("API Status Error: %d", resp.StatusCode)
 	}
 
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error: %s", string(respBody))
+	capacity := int64(512)
+	if resp.ContentLength > 0 {
+		capacity = resp.ContentLength
+	}
+	outBuf := bytes.NewBuffer(make([]byte, 0, capacity))
+
+	limitReader := io.LimitReader(resp.Body, 10*1024*1024)
+	if _, err := io.Copy(outBuf, limitReader); err != nil {
+		return nil, fmt.Errorf("read response body failed: %v", err)
 	}
 
-	return respBody, nil
+	body := outBuf.Bytes()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return body, fmt.Errorf("API Error: %d, Response: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
 func (tm *TrayManager) ReloadConfigFile() {
