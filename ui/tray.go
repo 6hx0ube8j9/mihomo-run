@@ -498,6 +498,7 @@ func (tm *TrayManager) CleanupWebUI() {
 
 func (tm *TrayManager) SetupTrayUI() {
 	tm.UpdateIconByState(0)
+	systray.SetTooltip("Mihomo-Run")
 	tm.cm.SetSystemInitializing(true)
 	tm.cm.EnsureDefaultConfig()
 	tm.SniffAndSolidifyConfig()
