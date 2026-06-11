@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -32,7 +31,10 @@ import (
 //go:embed icons/*.ico
 var iconFs embed.FS
 
-const debugPort = "52719"
+const (
+	MaxBrowserFocusRetry  = 20
+	BrowserFocusSleepTime = 50 * time.Millisecond
+)
 
 var tunKeywords = []string{"mihomo", "meta", "clash", "sing-box", "wintun"}
 
@@ -42,15 +44,12 @@ var bufPool = sync.Pool{
 	},
 }
 
-// 定义状态机常量
 const (
 	StateStop    = 0
 	StateError   = 1
 	StateTun     = 2
 	StateProxy   = 3
 	StateDefault = 4
-	MaxBrowserFocusRetry  = 20
-	BrowserFocusSleepTime = 50 * time.Millisecond
 )
 
 type TrayManager struct {
@@ -60,8 +59,20 @@ type TrayManager struct {
 	httpClient      *http.Client
 	mTun            *systray.MenuItem
 	mProxy          *systray.MenuItem
-	chromeDebugPort string 
+	chromeDebugPort string
 	debugPortMu     sync.Mutex
+}
+
+func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
+	return &TrayManager{
+		cm: cm,
+		km: km,
+		pm: pm,
+		httpClient: &http.Client{
+			Timeout:   500 * time.Millisecond,
+			Transport: &http.Transport{DisableKeepAlives: true},
+		},
+	}
 }
 
 func getFreePort() string {
@@ -78,18 +89,8 @@ func getFreePort() string {
 	return port
 }
 
-func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
-	return &TrayManager{
-		cm:         cm,
-		km:         km,
-		pm:         pm,
-		httpClient: &http.Client{Timeout: 500 * time.Millisecond},
-	}
-}
-
-
 func (tm *TrayManager) WatchTunState() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -208,7 +209,7 @@ func (tm *TrayManager) evaluateTargetState() int32 {
 		}
 		return StateTun
 	}
-	
+
 	if time.Since(recoveryStart) < 3*time.Second {
 		if last := tm.cm.GetLastState(); last != -1 {
 			return last
@@ -222,6 +223,8 @@ func (tm *TrayManager) evaluateTargetState() int32 {
 func (tm *TrayManager) MonitorIconState() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	var pendingState int32 = -1
+	var pendingCount int
 
 	for {
 		select {
@@ -229,7 +232,7 @@ func (tm *TrayManager) MonitorIconState() {
 			if tm.cm.IsReallyExiting() {
 				return
 			}
-			
+
 			if tm.mProxy != nil {
 				proxyIsOn := tm.cm.GetProxyState()
 				if proxyIsOn && !tm.mProxy.Checked() {
@@ -240,15 +243,28 @@ func (tm *TrayManager) MonitorIconState() {
 			}
 
 			targetState := tm.evaluateTargetState()
+			lastState := tm.cm.GetLastState()
 
-			if tm.cm.GetLastState() != targetState {
-				tm.UpdateIconByState(int(targetState))
-				tm.cm.SetLastState(targetState)
+			if lastState != targetState {
+				if pendingState == targetState {
+					pendingCount++
+					if pendingCount >= 2 {
+						tm.UpdateIconByState(int(targetState))
+						tm.cm.SetLastState(targetState)
+						pendingCount = 0
+						pendingState = -1
+					}
+				} else {
+					pendingState = targetState
+					pendingCount = 1
+				}
+			} else {
+				pendingState = -1
+				pendingCount = 0
 			}
 		}
 	}
 }
-
 
 func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([]byte, error) {
 	apiAddr := strings.TrimSuffix(tm.cm.GetJsonConfig("external-controller"), "/")
@@ -267,17 +283,21 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 		buf = bufPool.Get().(*bytes.Buffer)
 		buf.Reset()
 		if err := json.NewEncoder(buf).Encode(payload); err != nil {
-			bufPool.Put(buf)
-			return nil, fmt.Errorf("marshal payload failed: %v", err)
+			if buf.Cap() <= 65536 {
+				bufPool.Put(buf)
+			}
+			return nil, err
 		}
 		bodyReader = buf
-	} else if method == "PUT" || method == "POST" || method == "PATCH" {
+	} else if method == http.MethodPut || method == http.MethodPost || method == http.MethodPatch {
 		bodyReader = bytes.NewReader([]byte("{}"))
 	}
 
 	defer func() {
 		if buf != nil {
-			bufPool.Put(buf)
+			if buf.Cap() <= 65536 {
+				bufPool.Put(buf)
+			}
 		}
 	}()
 
@@ -286,7 +306,10 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if bodyReader != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
 	if secret := tm.cm.GetJsonConfig("secret"); secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
@@ -297,7 +320,7 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 204 || resp.ContentLength == 0 {
+	if resp.StatusCode == http.StatusNoContent || resp.ContentLength == 0 {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil, nil
@@ -305,21 +328,16 @@ func (tm *TrayManager) DoAPIRequest(method, path string, payload interface{}) ([
 		return nil, fmt.Errorf("API Status Error: %d", resp.StatusCode)
 	}
 
-	capacity := int64(512)
-	if resp.ContentLength > 0 {
-		capacity = resp.ContentLength
-	}
-	outBuf := bytes.NewBuffer(make([]byte, 0, capacity))
-
 	limitReader := io.LimitReader(resp.Body, 10*1024*1024)
-	if _, err := io.Copy(outBuf, limitReader); err != nil {
-		return nil, fmt.Errorf("read response body failed: %v", err)
+	body, err := io.ReadAll(limitReader)
+	if err != nil {
+		return nil, err
 	}
 
-	body := outBuf.Bytes()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return body, fmt.Errorf("API Error: %d, Response: %s", resp.StatusCode, string(body))
 	}
+
 	return body, nil
 }
 
@@ -408,8 +426,8 @@ func (tm *TrayManager) LaunchWebUI() {
 	tm.debugPortMu.Unlock()
 
 	client := &http.Client{
-		Timeout: 300 * time.Millisecond,
-		Transport: &http.Transport{DisableKeepAlives: true}, 
+		Timeout:   300 * time.Millisecond,
+		Transport: &http.Transport{DisableKeepAlives: true},
 	}
 
 	if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json", safeDebugPort)); err == nil {
@@ -464,6 +482,7 @@ func (tm *TrayManager) LaunchWebUI() {
 
 		args := []string{
 			"--app=" + finalURL,
+			"--app-id=mihomo-run",
 			"--remote-debugging-port=" + safeDebugPort,
 			"--user-data-dir=" + userDataDir,
 			"--window-size=" + strconv.Itoa(winW) + "," + strconv.Itoa(winH),
@@ -483,13 +502,9 @@ func (tm *TrayManager) LaunchWebUI() {
 					time.Sleep(BrowserFocusSleepTime)
 				}
 			}()
-		} else {
-			log.Printf("[UI] 启动浏览器失败: %v", err)
 		}
 	} else {
-		if err := exec.Command("cmd", "/c", "start", "", finalURL).Start(); err != nil {
-			log.Printf("[UI] 调用系统默认浏览器失败: %v", err)
-		}
+		_ = exec.Command("cmd", "/c", "start", "", finalURL).Start()
 	}
 }
 
@@ -503,10 +518,9 @@ func (tm *TrayManager) CleanupWebUI() {
 	}
 
 	client := &http.Client{
-		Timeout: 200 * time.Millisecond,
+		Timeout:   200 * time.Millisecond,
 		Transport: &http.Transport{DisableKeepAlives: true},
 	}
-	
 	apiURL := fmt.Sprintf("http://127.0.0.1:%s/json", safeDebugPort)
 	if resp, err := client.Get(apiURL); err == nil {
 		var targets []map[string]interface{}
@@ -636,7 +650,7 @@ func (tm *TrayManager) SetupTrayUI() {
 		}
 		tm.cm.SetSystemInitializing(true)
 		tm.cm.SetHasFirstSynced(false)
-		
+
 		go func() {
 			tm.km.KillProcessByName("mihomo.exe")
 			tm.SniffAndSolidifyConfig()
@@ -688,14 +702,14 @@ func (tm *TrayManager) SetTunMode(enable bool) {
 				tm.cm.SetSystemInitializing(false)
 			}
 		}()
-		
+
 		_, err := tm.DoAPIRequest("PATCH", "/configs", map[string]interface{}{
 			"tun": map[string]bool{"enable": enable},
 		})
 		if err != nil {
 			return
 		}
-		
+
 		for i := 0; i < 15; i++ {
 			if tm.cm.GetGlobalOpID() != opID {
 				return
@@ -709,7 +723,6 @@ func (tm *TrayManager) SetTunMode(enable bool) {
 				}
 			}
 			if found == enable {
-				// 替换为新的状态汇报方法
 				tm.cm.UpdateTunAliveStatus(enable)
 				break
 			}
@@ -733,13 +746,12 @@ func (tm *TrayManager) SniffAndSolidifyConfig() {
 		line := scanner.Text()
 		if idx := strings.Index(line, "#"); idx >= 0 {
 			line = line[:idx]
-		}	
-			
-        trimmed := strings.TrimSpace(line)
+		}
+
+		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
-		
 		if strings.HasPrefix(trimmed, "mixed-port:") {
 			if parts := strings.SplitN(trimmed, ":", 2); len(parts) == 2 {
 				if port := strings.Trim(parts[1], " \"'"); port != "" {
@@ -822,18 +834,12 @@ func (tm *TrayManager) ToggleAutoStart(enable bool) {
 		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil {
 			success = true
-			log.Println("[UI] AutoStart enabled successfully.")
-		} else {
-			log.Printf("[UI] Failed to enable AutoStart: %v\n", err)
 		}
 	} else {
 		cmd := exec.Command("schtasks", "/Delete", "/TN", "\\"+taskName, "/F")
 		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 		if err := cmd.Run(); err == nil || !tm.CheckAutoStartStatus() {
 			success = true
-			log.Println("[UI] AutoStart disabled successfully.")
-		} else {
-			log.Printf("[UI] Failed to disable AutoStart: %v\n", err)
 		}
 	}
 	if success {
