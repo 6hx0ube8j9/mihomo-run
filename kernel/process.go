@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -30,10 +31,12 @@ type KernelHooks struct {
 }
 
 type KernelManager struct {
-	hJob  windows.Handle
-	cm    ConfigContextInterface
-	hooks KernelHooks
-	currentPid uint32
+	hJob          windows.Handle
+	cm            ConfigContextInterface
+	hooks         KernelHooks
+	currentPid    uint32
+	activeProcess *os.Process
+	processMu     sync.Mutex
 }
 
 func (km *KernelManager) isPidRunning(pid uint32) bool {
@@ -94,9 +97,13 @@ func (km *KernelManager) CloseJobObject() {
 }
 
 func (km *KernelManager) IsProcessRunning(name string) bool {
-	if strings.EqualFold(name, "mihomo.exe") && km.cm.IsKernelActive() {
-		return true
+	if strings.EqualFold(name, "mihomo.exe") {
+		pid := atomic.LoadUint32(&km.currentPid)
+		if pid != 0 && km.isPidRunning(pid) {
+			return true
+		}
 	}
+
 	h, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil || h == windows.InvalidHandle {
 		return false
@@ -124,6 +131,18 @@ func (km *KernelManager) IsProcessRunning(name string) bool {
 }
 
 func (km *KernelManager) KillProcessByName(name string) {
+	if strings.EqualFold(name, "mihomo.exe") {
+		km.processMu.Lock()
+		if km.activeProcess != nil {
+			_ = km.activeProcess.Kill()
+			km.activeProcess = nil
+			atomic.StoreUint32(&km.currentPid, 0)
+			km.processMu.Unlock()
+			return
+		}
+		km.processMu.Unlock()
+	}
+
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil || snapshot == windows.InvalidHandle {
 		return
@@ -132,7 +151,6 @@ func (km *KernelManager) KillProcessByName(name string) {
 
 	var pe windows.ProcessEntry32
 	pe.Size = uint32(unsafe.Sizeof(pe))
-
 	if err := windows.Process32First(snapshot, &pe); err != nil {
 		return
 	}
@@ -191,10 +209,14 @@ func (km *KernelManager) MonitorKernelDaemon() {
 			continue
 		}
 
+		km.processMu.Lock()
+		km.activeProcess = cmd.Process
 		atomic.StoreUint32(&km.currentPid, uint32(cmd.Process.Pid))
+		km.processMu.Unlock()
+
 		km.cm.SetTunStartTime(time.Now())
 		km.cm.SetKernelActive(true)
-		
+
 		if km.hooks.OnKernelStarted != nil {
 			km.hooks.OnKernelStarted()
 		}
@@ -236,7 +258,12 @@ func (km *KernelManager) MonitorKernelDaemon() {
 
 		ticker.Stop()
 		km.cm.SetKernelActive(false)
+		
+		km.processMu.Lock()
+		km.activeProcess = nil
 		atomic.StoreUint32(&km.currentPid, 0)
+		km.processMu.Unlock()
+
 		time.Sleep(1 * time.Second)
 	}
 }
