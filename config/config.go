@@ -1,394 +1,154 @@
-package config
+package main
 
 import (
-	"encoding/json"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/energye/systray"
+	"golang.org/x/sys/windows"
+
+	"mihomo-run/config"
+	"mihomo-run/kernel"
+	"mihomo-run/sysproxy"
+	"mihomo-run/ui"
 )
 
-const CONFIG_FILE = "mihomo-run.json"
+const (
+	APP_MUTEX     = "Mihomo_Unique_Mutex"
+	SHOW_UI_EVENT = "Mihomo_Unique_Mutex_ShowUI"
+)
 
-type ConfigManager struct {
-	baseDir string
-	exePath string
-
-	configMu         sync.RWMutex
-	configData       map[string]string
-	currentModeState string
-	lastAppliedProxy bool
-
-	isSystemInitializing int32
-	isSyncing            int32
-	globalOpID           int32
-	hasFirstSynced       int32
-	isKernelActive       int32
-	isFocusing           int32
-	isReallyExiting      int32
-	tunStartTime     time.Time
-	tunAlive         bool
-	tunRecoveryStart time.Time
-	configVersion      int32
-	lastWrittenVersion int32
-	lastState          int32
-	atomicProxyState   int32
-	atomicTunState     int32
-	lastClickTime      int64
-	isProxyWriting     int32
-}
-
-func NewConfigManager(baseDir, exePath string) *ConfigManager {
-	return &ConfigManager{
-		baseDir:              baseDir,
-		exePath:              exePath,
-		configData:           make(map[string]string),
-		isSystemInitializing: 1,
-		lastState:            -1,
-	}
-}
-
-func (cm *ConfigManager) GetJsonConfig(key string) string {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.configData[key]
-}
-
-func (cm *ConfigManager) EnsureDefaultConfig() {
-	tmpFiles, _ := filepath.Glob(filepath.Join(cm.baseDir, CONFIG_FILE+".tmp*"))
-	for _, f := range tmpFiles {
-		_ = os.Remove(f)
-	}
-
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-
-	cfgPath := filepath.Join(cm.baseDir, CONFIG_FILE)
-	defaults := map[string]string{
-		"proxy":               "false",
-		"tun":                 "false",
-		"autostart":           "false",
-		"mode":                "rule",
-		"port":                "7890",
-		"tun_device":          "mihomo",
-		"external-controller": "http://127.0.0.1:9090",
-		"secret":              "",
-	}
-
-	fileData := make(map[string]string)
-	f, err := os.Open(cfgPath)
-	if err == nil {
-		_ = json.NewDecoder(f).Decode(&fileData)
-		f.Close()
-	}
-
-	hasChanges := false
-	for k, v := range defaults {
-		fileVal, exists := fileData[k]
-		if !exists || fileVal == "" {
-			fileData[k] = v
-			hasChanges = true
-		}
-	}
-
-	if hasChanges || err != nil {
-		if b, marshalErr := json.Marshal(fileData); marshalErr == nil {
-			tmpPath := cfgPath + ".tmp_init"
-			if writeErr := os.WriteFile(tmpPath, b, 0644); writeErr == nil {
-				for i := 0; i < 3; i++ {
-					if renameErr := os.Rename(tmpPath, cfgPath); renameErr == nil {
-						break
-					}
-					time.Sleep(time.Duration(50*(i+1)) * time.Millisecond)
-				}
-			}
-		}
-	}
-
-	for k, v := range fileData {
-		cm.configData[k] = v
-	}
-	currentProxy := cm.configData["proxy"]
-	currentTun := cm.configData["tun"]
-	currentMode := cm.configData["mode"]
-
-	if currentProxy == "true" {
-		atomic.StoreInt32(&cm.atomicProxyState, 1)
-	} else {
-		atomic.StoreInt32(&cm.atomicProxyState, 0)
-	}
-
-	if currentTun == "true" {
-		atomic.StoreInt32(&cm.atomicTunState, 1)
-		cm.tunStartTime = time.Now()
-	} else {
-		atomic.StoreInt32(&cm.atomicTunState, 0)
-	}
-
-	cm.currentModeState = currentMode
-}
-
-func (cm *ConfigManager) SaveJsonConfig(key, value string) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-
-	if key != "" {
-		if cm.configData[key] == value {
-			return
-		}
-		cm.configData[key] = value
-
-		switch key {
-		case "proxy":
-			if value == "true" {
-				atomic.StoreInt32(&cm.atomicProxyState, 1)
-			} else {
-				atomic.StoreInt32(&cm.atomicProxyState, 0)
-			}
-		case "tun":
-			if value == "true" {
-				atomic.StoreInt32(&cm.atomicTunState, 1)
-				cm.tunStartTime = time.Now()
-			} else {
-				atomic.StoreInt32(&cm.atomicTunState, 0)
-				cm.tunStartTime = time.Time{}
-			}
-		case "mode":
-			cm.currentModeState = value
-		}
-	}
-
-	b, err := json.Marshal(cm.configData)
+func main() {
+	exePath, err := os.Executable()
 	if err != nil {
 		return
 	}
+	baseDir := filepath.Dir(exePath)
+	_ = os.Chdir(baseDir)
 
-	dir := cm.baseDir
-	if dir == "" {
-		dir = "."
-	}
-
-	tmpFile, err := os.CreateTemp(dir, "mihomo-run-*.tmp")
-	if err != nil {
+	mName, _ := windows.UTF16PtrFromString(APP_MUTEX)
+	hM, err := windows.CreateMutex(nil, false, mName)
+	
+	if err != nil || windows.GetLastError() == windows.ERROR_ALREADY_EXISTS {
+		if hM != 0 {
+			windows.CloseHandle(hM)
+		}
+		
+		eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
+		hEvent, err := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, eName)
+		if err == nil && hEvent != 0 {
+			windows.SetEvent(hEvent)
+			windows.CloseHandle(hEvent)
+		}
 		return
 	}
-	tmpName := tmpFile.Name()
-	defer func() {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpName)
+	defer windows.CloseHandle(hM)
+
+	eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
+	hShowUIEvent, _ := windows.CreateEvent(nil, false, false, eName)
+	if hShowUIEvent != 0 {
+		defer windows.CloseHandle(hShowUIEvent)
+	}
+
+	isAutostart := false
+	for _, arg := range os.Args {
+		if arg == "---autostart" {
+			isAutostart = true
+			break
+		}
+	}
+
+	if !isAdmin() && !isAutostart {
+		runAsAdmin(exePath, baseDir)
+		return
+	}
+
+	configMgr := config.NewConfigManager(baseDir, exePath)
+	win32API := &sysproxy.Win32NotificationBridge{}
+	proxyMgr := sysproxy.NewProxyManager(configMgr, win32API)
+
+	kernelHooks := kernel.KernelHooks{
+		OnKernelStarted: func() {
+			trayTemp := ui.NewTrayManager(configMgr, nil, nil)
+			trayTemp.SniffAndSolidifyConfig()
+		},
+		OnKernelReady: func() {
+			trayTemp := ui.NewTrayManager(configMgr, nil, proxyMgr)
+			trayTemp.SyncConfigToKernel()
+
+			if configMgr.GetJsonConfig("proxy") == "true" {
+				configMgr.SetLastAppliedProxy(false)
+				proxyMgr.SetProxyRegistry(true)
+			}
+		},
+	}
+
+	kernelMgr := kernel.NewKernelManager(configMgr, kernelHooks)
+	kernelMgr.InitJobObject()
+	defer kernelMgr.CloseJobObject()
+
+	trayMgr := ui.NewTrayManager(configMgr, kernelMgr, proxyMgr)
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		systray.Quit()
 	}()
 
-	if _, err := tmpFile.Write(b); err != nil {
-		return
-	}
-	if err := tmpFile.Sync(); err != nil {
-		return
-	}
-	_ = tmpFile.Close()
+	uiReady := make(chan struct{})
 
-	targetPath := filepath.Join(cm.baseDir, CONFIG_FILE)
-	_ = os.Rename(tmpName, targetPath)
+	go func() {
+		<-uiReady
+		go kernelMgr.MonitorKernelDaemon()
+		go trayMgr.MonitorIconState()
+		go trayMgr.WatchTunState()
+		go trayMgr.WatchCoreAPI()
+		go proxyMgr.WatchProxyRegistry()
 
-	atomic.AddInt32(&cm.configVersion, 1)
+		if hShowUIEvent != 0 {
+			go func() {
+				for {
+					s, _ := windows.WaitForSingleObject(hShowUIEvent, windows.INFINITE)
+					if s == windows.WAIT_OBJECT_0 {
+						if configMgr.CheckAndThrottleClick(int64(1000 * time.Millisecond)) {
+							go trayMgr.LaunchWebUI()
+						}
+					} else {
+						break
+					}
+				}
+			}()
+		}
+	}()
+
+	systray.Run(func() {
+		trayMgr.SetupTrayUI()
+		close(uiReady)
+	}, func() {
+		configMgr.MarkAsExiting()
+		trayMgr.CleanupWebUI()
+		proxyMgr.SetProxyRegistry(false)
+		systray.Quit()
+	})
 }
 
-func (cm *ConfigManager) UpdateTunAliveStatus(alive bool) {
-    cm.configMu.Lock()
-    defer cm.configMu.Unlock()
-    cm.tunAlive = alive
-}
-
-func (cm *ConfigManager) IsTunInterfaceCurrentlyAlive() bool {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunAlive
-}
-
-func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
-func (cm *ConfigManager) ExePath() string { return cm.exePath }
-
-func (cm *ConfigManager) GetLastAppliedProxy() bool {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.lastAppliedProxy
-}
-
-func (cm *ConfigManager) SetLastAppliedProxy(enable bool) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.lastAppliedProxy = enable
-}
-
-func (cm *ConfigManager) GetCurrentModeState() string {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.currentModeState
-}
-
-func (cm *ConfigManager) SetCurrentModeState(mode string) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.currentModeState = mode
-}
-
-func (cm *ConfigManager) IsSystemInitializing() bool {
-	return atomic.LoadInt32(&cm.isSystemInitializing) == 1
-}
-
-func (cm *ConfigManager) SetSystemInitializing(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isSystemInitializing, i)
-}
-
-func (cm *ConfigManager) IsSyncing() bool {
-	return atomic.LoadInt32(&cm.isSyncing) == 1
-}
-
-func (cm *ConfigManager) SetSyncing(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isSyncing, i)
-}
-
-func (cm *ConfigManager) CompareAndSwapSyncing(oldVal, newVal int32) bool {
-	return atomic.CompareAndSwapInt32(&cm.isSyncing, oldVal, newVal)
-}
-
-func (cm *ConfigManager) GetProxyState() bool {
-	return atomic.LoadInt32(&cm.atomicProxyState) == 1
-}
-
-func (cm *ConfigManager) SetProxyState(enable bool) {
-	var i int32
-	if enable {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.atomicProxyState, i)
-}
-
-func (cm *ConfigManager) GetTunState() bool {
-	return atomic.LoadInt32(&cm.atomicTunState) == 1
-}
-
-func (cm *ConfigManager) SetTunState(enable bool) {
-	var i int32
-	if enable {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.atomicTunState, i)
-}
-
-func (cm *ConfigManager) IsReallyExiting() bool {
-	return atomic.LoadInt32(&cm.isReallyExiting) == 1
-}
-
-func (cm *ConfigManager) MarkAsExiting() {
-	atomic.StoreInt32(&cm.isReallyExiting, 1)
-}
-
-func (cm *ConfigManager) GetLastState() int32 {
-	return atomic.LoadInt32(&cm.lastState)
-}
-
-func (cm *ConfigManager) SetLastState(state int32) {
-	atomic.StoreInt32(&cm.lastState, state)
-}
-
-func (cm *ConfigManager) AddGlobalOpID() int32 {
-	return atomic.AddInt32(&cm.globalOpID, 1)
-}
-
-func (cm *ConfigManager) GetGlobalOpID() int32 {
-	return atomic.LoadInt32(&cm.globalOpID)
-}
-
-func (cm *ConfigManager) SetHasFirstSynced(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.hasFirstSynced, i)
-}
-
-func (cm *ConfigManager) IsKernelActive() bool {
-	return atomic.LoadInt32(&cm.isKernelActive) == 1
-}
-
-func (cm *ConfigManager) SetKernelActive(active bool) {
-	var i int32
-	if active {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isKernelActive, i)
-}
-
-func (cm *ConfigManager) CompareAndSwapFocusing(oldVal, newVal int32) bool {
-	return atomic.CompareAndSwapInt32(&cm.isFocusing, oldVal, newVal)
-}
-
-func (cm *ConfigManager) SetFocusing(val int32) {
-	atomic.StoreInt32(&cm.isFocusing, val)
-}
-
-func (cm *ConfigManager) CheckAndThrottleClick(thresholdNano int64) bool {
-	now := time.Now().UnixNano()
-	last := atomic.LoadInt64(&cm.lastClickTime)
-	if now-last < thresholdNano {
+func isAdmin() bool {
+	var token windows.Token
+	err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token)
+	if err != nil {
 		return false
 	}
-	atomic.StoreInt64(&cm.lastClickTime, now)
-	return true
+	defer token.Close()
+	return token.IsElevated()
 }
 
-func (cm *ConfigManager) IsProxyWriting() bool {
-	return atomic.LoadInt32(&cm.isProxyWriting) == 1
-}
-
-func (cm *ConfigManager) SetProxyWriting(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isProxyWriting, i)
-}
-func (cm *ConfigManager) GetTunStartTime() time.Time {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunStartTime
-}
-
-func (cm *ConfigManager) SetTunStartTime(t time.Time) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.tunStartTime = t
-}
-
-func (cm *ConfigManager) IsTunAlive() bool {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunAlive
-}
-
-func (cm *ConfigManager) SetTunAlive(alive bool) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.tunAlive = alive
-}
-
-func (cm *ConfigManager) GetTunRecoveryStart() time.Time {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunRecoveryStart
-}
-
-func (cm *ConfigManager) SetTunRecoveryStart(t time.Time) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.tunRecoveryStart = t
+func runAsAdmin(exe, dir string) {
+	verb, _ := syscall.UTF16PtrFromString("runas")
+	exePtr, _ := syscall.UTF16PtrFromString(exe)
+	cwdPtr, _ := syscall.UTF16PtrFromString(dir)
+	_ = windows.ShellExecute(0, verb, exePtr, nil, cwdPtr, windows.SW_SHOWNORMAL)
 }
