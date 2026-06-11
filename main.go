@@ -5,6 +5,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/energye/systray"
 	"golang.org/x/sys/windows"
@@ -15,7 +16,10 @@ import (
 	"mihomo-run/ui"
 )
 
-const APP_MUTEX = "Mihomo_Unique_Mutex"
+const (
+	APP_MUTEX     = "Mihomo_Unique_Mutex"
+	SHOW_UI_EVENT = "Mihomo_Unique_Mutex_ShowUI"
+)
 
 func main() {
 	exePath, err := os.Executable()
@@ -27,13 +31,27 @@ func main() {
 
 	mName, _ := windows.UTF16PtrFromString(APP_MUTEX)
 	hM, err := windows.CreateMutex(nil, false, mName)
+	
 	if err != nil || windows.GetLastError() == windows.ERROR_ALREADY_EXISTS {
 		if hM != 0 {
 			windows.CloseHandle(hM)
 		}
+		
+		eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
+		hEvent, err := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, eName)
+		if err == nil && hEvent != 0 {
+			windows.SetEvent(hEvent)
+			windows.CloseHandle(hEvent)
+		}
 		return
 	}
 	defer windows.CloseHandle(hM)
+
+	eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
+	hShowUIEvent, _ := windows.CreateEvent(nil, false, false, eName)
+	if hShowUIEvent != 0 {
+		defer windows.CloseHandle(hShowUIEvent)
+	}
 
 	isAutostart := false
 	for _, arg := range os.Args {
@@ -49,7 +67,6 @@ func main() {
 	}
 
 	configMgr := config.NewConfigManager(baseDir, exePath)
-
 	win32API := &sysproxy.Win32NotificationBridge{}
 	proxyMgr := sysproxy.NewProxyManager(configMgr, win32API)
 
@@ -89,8 +106,23 @@ func main() {
 		go kernelMgr.MonitorKernelDaemon()
 		go trayMgr.MonitorIconState()
 		go trayMgr.WatchTunState()
-		go trayMgr.WatchCoreAPI() 
+		go trayMgr.WatchCoreAPI()
 		go proxyMgr.WatchProxyRegistry()
+
+		if hShowUIEvent != 0 {
+			go func() {
+				for {
+					s, _ := windows.WaitForSingleObject(hShowUIEvent, windows.INFINITE)
+					if s == windows.WAIT_OBJECT_0 {
+						if configMgr.CheckAndThrottleClick(int64(1000 * time.Millisecond)) {
+							go trayMgr.LaunchWebUI()
+						}
+					} else {
+						break
+					}
+				}
+			}()
+		}
 	}()
 
 	systray.Run(func() {
@@ -98,7 +130,7 @@ func main() {
 		close(uiReady)
 	}, func() {
 		configMgr.MarkAsExiting()
-		trayMgr.CleanupWebUI() 
+		trayMgr.CleanupWebUI()
 		proxyMgr.SetProxyRegistry(false)
 		systray.Quit()
 	})
