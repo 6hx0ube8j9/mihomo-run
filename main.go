@@ -48,7 +48,7 @@ func main() {
 	defer windows.CloseHandle(hM)
 
 	eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
-	hShowUIEvent, _ := windows.CreateEvent(nil, false, false, eName)
+	hShowUIEvent, _ := windows.CreateEvent(nil, 0, 0, eName)
 	if hShowUIEvent != 0 {
 		defer windows.CloseHandle(hShowUIEvent)
 	}
