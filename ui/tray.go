@@ -49,15 +49,33 @@ const (
 	StateTun     = 2
 	StateProxy   = 3
 	StateDefault = 4
+	MaxBrowserFocusRetry  = 20
+	BrowserFocusSleepTime = 50 * time.Millisecond
 )
 
 type TrayManager struct {
-	cm         *config.ConfigManager
-	km         *kernel.KernelManager
-	pm         *sysproxy.ProxyManager
-	httpClient *http.Client
-	mTun       *systray.MenuItem
-	mProxy     *systray.MenuItem
+	cm              *config.ConfigManager
+	km              *kernel.KernelManager
+	pm              *sysproxy.ProxyManager
+	httpClient      *http.Client
+	mTun            *systray.MenuItem
+	mProxy          *systray.MenuItem
+	chromeDebugPort string 
+	debugPortMu     sync.Mutex
+}
+
+func getFreePort() string {
+	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "52719"
+	}
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return "52719"
+	}
+	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+	_ = l.Close()
+	return port
 }
 
 func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysproxy.ProxyManager) *TrayManager {
@@ -382,11 +400,19 @@ func (tm *TrayManager) LaunchWebUI() {
 		winapi.SetCachedWebUIHwnd(0)
 	}
 
-	client := &http.Client{Timeout: 300 * time.Millisecond}
-	isPortOccupied := false
+	tm.debugPortMu.Lock()
+	if tm.chromeDebugPort == "" {
+		tm.chromeDebugPort = getFreePort()
+	}
+	safeDebugPort := tm.chromeDebugPort
+	tm.debugPortMu.Unlock()
 
-	if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json", debugPort)); err == nil {
-		isPortOccupied = true
+	client := &http.Client{
+		Timeout: 300 * time.Millisecond,
+		Transport: &http.Transport{DisableKeepAlives: true}, 
+	}
+
+	if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json", safeDebugPort)); err == nil {
 		defer resp.Body.Close()
 		var targets []map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&targets); err == nil {
@@ -394,37 +420,21 @@ func (tm *TrayManager) LaunchWebUI() {
 				pURL, _ := t["url"].(string)
 				if strings.Contains(pURL, "/ui/") || strings.Contains(pURL, "setup") {
 					id, _ := t["id"].(string)
-
-					if actResp, actErr := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json/activate/%s", debugPort, id)); actErr == nil {
+					if actResp, actErr := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json/activate/%s", safeDebugPort, id)); actErr == nil {
 						_ = actResp.Body.Close()
 					}
-
 					go func() {
-						for i := 0; i < 20; i++ {
+						for i := 0; i < MaxBrowserFocusRetry; i++ {
 							if winapi.FindAndFocusChromeWindow(0, tm.cm) {
 								break
 							}
-							time.Sleep(50 * time.Millisecond)
+							time.Sleep(BrowserFocusSleepTime)
 						}
 					}()
 					return
 				}
 			}
 		}
-	} else {
-		conn, dialErr := net.DialTimeout("tcp", "127.0.0.1:"+debugPort, 50*time.Millisecond)
-		if dialErr == nil {
-			conn.Close()
-			isPortOccupied = true
-		}
-	}
-
-	if isPortOccupied {
-		killCmd := fmt.Sprintf("for /f \"tokens=5\" %%a in ('netstat -aon ^| findstr :%s ^| findstr LISTENING') do taskkill /F /PID %%a", debugPort)
-		cmd := exec.Command("cmd", "/c", killCmd)
-		cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
-		_ = cmd.Run()
-		time.Sleep(150 * time.Millisecond)
 	}
 
 	var browserPath string
@@ -454,7 +464,7 @@ func (tm *TrayManager) LaunchWebUI() {
 
 		args := []string{
 			"--app=" + finalURL,
-			"--remote-debugging-port=" + debugPort,
+			"--remote-debugging-port=" + safeDebugPort,
 			"--user-data-dir=" + userDataDir,
 			"--window-size=" + strconv.Itoa(winW) + "," + strconv.Itoa(winH),
 			"--window-position=" + strconv.Itoa(winX) + "," + strconv.Itoa(winY),
@@ -465,30 +475,45 @@ func (tm *TrayManager) LaunchWebUI() {
 		cmd := exec.Command(browserPath, args...)
 		if err := cmd.Start(); err == nil {
 			mainPid := uint32(cmd.Process.Pid)
-
 			go func() {
-				for i := 0; i < 20; i++ {
+				for i := 0; i < MaxBrowserFocusRetry; i++ {
 					if winapi.FindAndFocusChromeWindow(mainPid, tm.cm) {
 						break
 					}
-					time.Sleep(50 * time.Millisecond)
+					time.Sleep(BrowserFocusSleepTime)
 				}
 			}()
+		} else {
+			log.Printf("[UI] 启动浏览器失败: %v", err)
 		}
 	} else {
-		_ = exec.Command("cmd", "/c", "start", "", finalURL).Start()
+		if err := exec.Command("cmd", "/c", "start", "", finalURL).Start(); err != nil {
+			log.Printf("[UI] 调用系统默认浏览器失败: %v", err)
+		}
 	}
 }
 
 func (tm *TrayManager) CleanupWebUI() {
-	client := &http.Client{Timeout: 200 * time.Millisecond}
-	apiURL := fmt.Sprintf("http://127.0.0.1:%s/json", debugPort)
+	tm.debugPortMu.Lock()
+	safeDebugPort := tm.chromeDebugPort
+	tm.debugPortMu.Unlock()
+
+	if safeDebugPort == "" {
+		return
+	}
+
+	client := &http.Client{
+		Timeout: 200 * time.Millisecond,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	
+	apiURL := fmt.Sprintf("http://127.0.0.1:%s/json", safeDebugPort)
 	if resp, err := client.Get(apiURL); err == nil {
 		var targets []map[string]interface{}
 		if json.NewDecoder(resp.Body).Decode(&targets) == nil {
 			for _, t := range targets {
 				if id, ok := t["id"].(string); ok {
-					_, _ = client.Get(fmt.Sprintf("http://127.0.0.1:%s/json/close/%s", debugPort, id))
+					_, _ = client.Get(fmt.Sprintf("http://127.0.0.1:%s/json/close/%s", safeDebugPort, id))
 				}
 			}
 		}
@@ -706,10 +731,15 @@ func (tm *TrayManager) SniffAndSolidifyConfig() {
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = line[:idx]
+		}	
+			
+        trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
 			continue
 		}
+		
 		if strings.HasPrefix(trimmed, "mixed-port:") {
 			if parts := strings.SplitN(trimmed, ":", 2); len(parts) == 2 {
 				if port := strings.Trim(parts[1], " \"'"); port != "" {
