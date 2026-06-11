@@ -31,12 +31,10 @@ func main() {
 
 	mName, _ := windows.UTF16PtrFromString(APP_MUTEX)
 	hM, err := windows.CreateMutex(nil, false, mName)
-	
 	if err != nil || windows.GetLastError() == windows.ERROR_ALREADY_EXISTS {
 		if hM != 0 {
 			windows.CloseHandle(hM)
 		}
-		
 		eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
 		hEvent, err := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, eName)
 		if err == nil && hEvent != 0 {
@@ -48,7 +46,7 @@ func main() {
 	defer windows.CloseHandle(hM)
 
 	eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
-	hShowUIEvent, _ := windows.CreateEvent(nil, 0, 0, eName)
+	hShowUIEvent, _ := windows.CreateEvent(nil, false, false, eName)
 	if hShowUIEvent != 0 {
 		defer windows.CloseHandle(hShowUIEvent)
 	}
