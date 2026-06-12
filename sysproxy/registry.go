@@ -1,7 +1,6 @@
 package sysproxy
 
 import (
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -100,6 +99,7 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		}
 
 		if s == windows.WAIT_OBJECT_0 {
+
 			if time.Since(time.Unix(0, pm.lastWriteNano.Load())) < 1000*time.Millisecond {
 				continue
 			}
@@ -129,7 +129,7 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 			if realProxy && isPortHijacked {
 				retryCount = 0
 				pm.cm.SetLastAppliedProxy(false)
-				pm.cm.SaveJsonConfig("proxy", "false")
+				pm.cm.SaveJsonConfig("proxy", "false") 
 				continue
 			}
 
