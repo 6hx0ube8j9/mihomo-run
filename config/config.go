@@ -6,54 +6,50 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 const CONFIG_FILE = "mihomo-run.json"
 
+type AppState struct {
+	CurrentMode          string
+	LastAppliedProxy     bool
+	IsSystemInitializing bool
+	IsSyncing            bool
+	GlobalOpID           int32
+	HasFirstSynced       bool
+	IsKernelActive       bool
+	IsFocusing           bool
+	IsReallyExiting      bool
+	TunStartTime         time.Time
+	TunAlive             bool
+	TunRecoveryStart     time.Time
+	LastState            int32
+	ProxyEnabled         bool
+	TunEnabled           bool
+	LastClickTime        int64
+	IsProxyWriting       bool
+}
+
 type ConfigManager struct {
 	baseDir string
 	exePath string
 
-	configMu         sync.RWMutex
-	configData       map[string]string
-	currentModeState string
-	lastAppliedProxy bool
-
-	isSystemInitializing int32
-	isSyncing            int32
-	globalOpID           int32
-	hasFirstSynced       int32
-	isKernelActive       int32
-	isFocusing           int32
-	isReallyExiting      int32
-	tunStartTime     time.Time
-	tunAlive         bool
-	tunRecoveryStart time.Time
-	configVersion      int32
-	lastWrittenVersion int32
-	lastState          int32
-	atomicProxyState   int32
-	atomicTunState     int32
-	lastClickTime      int64
-	isProxyWriting     int32
+	mu         sync.RWMutex
+	configData map[string]string
+	state      AppState
 }
 
 func NewConfigManager(baseDir, exePath string) *ConfigManager {
 	return &ConfigManager{
-		baseDir:              baseDir,
-		exePath:              exePath,
-		configData:           make(map[string]string),
-		isSystemInitializing: 1,
-		lastState:            -1,
+		baseDir:    baseDir,
+		exePath:    exePath,
+		configData: make(map[string]string),
+		state: AppState{
+			IsSystemInitializing: true,
+			LastState:            -1,
+		},
 	}
-}
-
-func (cm *ConfigManager) GetJsonConfig(key string) string {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.configData[key]
 }
 
 func (cm *ConfigManager) EnsureDefaultConfig() {
@@ -62,8 +58,8 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 		_ = os.Remove(f)
 	}
 
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 
 	cfgPath := filepath.Join(cm.baseDir, CONFIG_FILE)
 	defaults := map[string]string{
@@ -110,63 +106,48 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	for k, v := range fileData {
 		cm.configData[k] = v
 	}
-	currentProxy := cm.configData["proxy"]
-	currentTun := cm.configData["tun"]
-	currentMode := cm.configData["mode"]
-
-	if currentProxy == "true" {
-		atomic.StoreInt32(&cm.atomicProxyState, 1)
-	} else {
-		atomic.StoreInt32(&cm.atomicProxyState, 0)
+	
+	cm.state.ProxyEnabled = (cm.configData["proxy"] == "true")
+	cm.state.TunEnabled = (cm.configData["tun"] == "true")
+	if cm.state.TunEnabled {
+		cm.state.TunStartTime = time.Now()
 	}
-
-	if currentTun == "true" {
-		atomic.StoreInt32(&cm.atomicTunState, 1)
-		cm.tunStartTime = time.Now()
-	} else {
-		atomic.StoreInt32(&cm.atomicTunState, 0)
-	}
-
-	cm.currentModeState = currentMode
+	cm.state.CurrentMode = cm.configData["mode"]
 }
 
 func (cm *ConfigManager) SaveJsonConfig(key, value string) {
-	cm.configMu.Lock()
-	
+	cm.mu.Lock()
 	if key == "" || cm.configData[key] == value {
-		cm.configMu.Unlock()
+		cm.mu.Unlock()
 		return
 	}
-	
+
 	cm.configData[key] = value
 
 	switch key {
 	case "tun":
-		if value == "true" {
-			atomic.StoreInt32(&cm.atomicTunState, 1)
-			cm.tunStartTime = time.Now() 
+		cm.state.TunEnabled = (value == "true")
+		if cm.state.TunEnabled {
+			cm.state.TunStartTime = time.Now()
 		} else {
-			atomic.StoreInt32(&cm.atomicTunState, 0)
-			cm.tunStartTime = time.Time{} 
+			cm.state.TunStartTime = time.Time{}
 		}
 	case "mode":
-		cm.currentModeState = value
+		cm.state.CurrentMode = value
 	case "proxy":
-		if value == "true" {
-			atomic.StoreInt32(&cm.atomicProxyState, 1)
-		} else {
-			atomic.StoreInt32(&cm.atomicProxyState, 0)
-		}
+		cm.state.ProxyEnabled = (value == "true")
 	}
 
-	b, err := json.Marshal(cm.configData)
+	dataCopy := make(map[string]string, len(cm.configData))
+	for k, v := range cm.configData {
+		dataCopy[k] = v
+	}
+	cm.mu.Unlock()
+
+	b, err := json.Marshal(dataCopy)
 	if err != nil {
-		cm.configMu.Unlock()
 		return
 	}
-	atomic.AddInt32(&cm.configVersion, 1)
-
-	cm.configMu.Unlock()
 
 	cfgPath := filepath.Join(cm.baseDir, CONFIG_FILE)
 	tmpPath := cfgPath + ".tmp_" + strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -183,15 +164,15 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	
+
 	if _, err = f.Write(b); err != nil {
 		return
 	}
 	if err = f.Sync(); err != nil {
 		return
 	}
-	
-	writeSuccess = true 
+
+	writeSuccess = true
 	_ = f.Close()
 
 	if err := os.Rename(tmpPath, cfgPath); err != nil {
@@ -199,202 +180,223 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 	}
 }
 
-func (cm *ConfigManager) UpdateTunAliveStatus(alive bool) {
-    cm.configMu.Lock()
-    defer cm.configMu.Unlock()
-    cm.tunAlive = alive
-}
-
-func (cm *ConfigManager) IsTunInterfaceCurrentlyAlive() bool {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunAlive
+func (cm *ConfigManager) GetJsonConfig(key string) string {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.configData[key]
 }
 
 func (cm *ConfigManager) BaseDir() string { return cm.baseDir }
 func (cm *ConfigManager) ExePath() string { return cm.exePath }
 
 func (cm *ConfigManager) GetLastAppliedProxy() bool {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.lastAppliedProxy
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.LastAppliedProxy
 }
 
 func (cm *ConfigManager) SetLastAppliedProxy(enable bool) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.lastAppliedProxy = enable
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.LastAppliedProxy = enable
 }
 
 func (cm *ConfigManager) GetCurrentModeState() string {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.currentModeState
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.CurrentMode
 }
 
 func (cm *ConfigManager) SetCurrentModeState(mode string) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.currentModeState = mode
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.CurrentMode = mode
 }
 
 func (cm *ConfigManager) IsSystemInitializing() bool {
-	return atomic.LoadInt32(&cm.isSystemInitializing) == 1
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.IsSystemInitializing
 }
 
 func (cm *ConfigManager) SetSystemInitializing(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isSystemInitializing, i)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.IsSystemInitializing = val
 }
 
 func (cm *ConfigManager) IsSyncing() bool {
-	return atomic.LoadInt32(&cm.isSyncing) == 1
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.IsSyncing
 }
 
 func (cm *ConfigManager) SetSyncing(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isSyncing, i)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.IsSyncing = val
 }
 
-func (cm *ConfigManager) CompareAndSwapSyncing(oldVal, newVal int32) bool {
-	return atomic.CompareAndSwapInt32(&cm.isSyncing, oldVal, newVal)
+func (cm *ConfigManager) TryStartSyncing() bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.state.IsSyncing {
+		return false
+	}
+	cm.state.IsSyncing = true
+	return true
 }
 
 func (cm *ConfigManager) GetProxyState() bool {
-	return atomic.LoadInt32(&cm.atomicProxyState) == 1
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.ProxyEnabled
 }
 
 func (cm *ConfigManager) SetProxyState(enable bool) {
-	var i int32
-	if enable {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.atomicProxyState, i)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.ProxyEnabled = enable
 }
 
 func (cm *ConfigManager) GetTunState() bool {
-	return atomic.LoadInt32(&cm.atomicTunState) == 1
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.TunEnabled
 }
 
 func (cm *ConfigManager) SetTunState(enable bool) {
-	var i int32
-	if enable {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.atomicTunState, i)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.TunEnabled = enable
 }
 
 func (cm *ConfigManager) IsReallyExiting() bool {
-	return atomic.LoadInt32(&cm.isReallyExiting) == 1
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.IsReallyExiting
 }
 
 func (cm *ConfigManager) MarkAsExiting() {
-	atomic.StoreInt32(&cm.isReallyExiting, 1)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.IsReallyExiting = true
 }
 
 func (cm *ConfigManager) GetLastState() int32 {
-	return atomic.LoadInt32(&cm.lastState)
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.LastState
 }
 
 func (cm *ConfigManager) SetLastState(state int32) {
-	atomic.StoreInt32(&cm.lastState, state)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.LastState = state
 }
 
 func (cm *ConfigManager) AddGlobalOpID() int32 {
-	return atomic.AddInt32(&cm.globalOpID, 1)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.GlobalOpID++
+	return cm.state.GlobalOpID
 }
 
 func (cm *ConfigManager) GetGlobalOpID() int32 {
-	return atomic.LoadInt32(&cm.globalOpID)
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.GlobalOpID
 }
 
 func (cm *ConfigManager) SetHasFirstSynced(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.hasFirstSynced, i)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.HasFirstSynced = val
 }
 
 func (cm *ConfigManager) IsKernelActive() bool {
-	return atomic.LoadInt32(&cm.isKernelActive) == 1
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.IsKernelActive
 }
 
 func (cm *ConfigManager) SetKernelActive(active bool) {
-	var i int32
-	if active {
-		i = 1
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.IsKernelActive = active
+}
+
+func (cm *ConfigManager) TryStartFocusing() bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if cm.state.IsFocusing {
+		return false
 	}
-	atomic.StoreInt32(&cm.isKernelActive, i)
+	cm.state.IsFocusing = true
+	return true
 }
 
-func (cm *ConfigManager) CompareAndSwapFocusing(oldVal, newVal int32) bool {
-	return atomic.CompareAndSwapInt32(&cm.isFocusing, oldVal, newVal)
-}
-
-func (cm *ConfigManager) SetFocusing(val int32) {
-	atomic.StoreInt32(&cm.isFocusing, val)
+func (cm *ConfigManager) SetFocusing(val bool) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.IsFocusing = val
 }
 
 func (cm *ConfigManager) CheckAndThrottleClick(thresholdNano int64) bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
 	now := time.Now().UnixNano()
-	last := atomic.LoadInt64(&cm.lastClickTime)
-	if now-last < thresholdNano {
+	if now-cm.state.LastClickTime < thresholdNano {
 		return false
 	}
-	atomic.StoreInt64(&cm.lastClickTime, now)
+	cm.state.LastClickTime = now
 	return true
 }
 
 func (cm *ConfigManager) IsProxyWriting() bool {
-	return atomic.LoadInt32(&cm.isProxyWriting) == 1
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.IsProxyWriting
 }
 
 func (cm *ConfigManager) SetProxyWriting(val bool) {
-	var i int32
-	if val {
-		i = 1
-	}
-	atomic.StoreInt32(&cm.isProxyWriting, i)
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.IsProxyWriting = val
 }
+
 func (cm *ConfigManager) GetTunStartTime() time.Time {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunStartTime
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.TunStartTime
 }
 
 func (cm *ConfigManager) SetTunStartTime(t time.Time) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.tunStartTime = t
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.TunStartTime = t
 }
 
 func (cm *ConfigManager) IsTunAlive() bool {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunAlive
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.TunAlive
 }
 
 func (cm *ConfigManager) SetTunAlive(alive bool) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.tunAlive = alive
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.TunAlive = alive
 }
 
 func (cm *ConfigManager) GetTunRecoveryStart() time.Time {
-	cm.configMu.RLock()
-	defer cm.configMu.RUnlock()
-	return cm.tunRecoveryStart
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	return cm.state.TunRecoveryStart
 }
 
 func (cm *ConfigManager) SetTunRecoveryStart(t time.Time) {
-	cm.configMu.Lock()
-	defer cm.configMu.Unlock()
-	cm.tunRecoveryStart = t
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.state.TunRecoveryStart = t
 }
