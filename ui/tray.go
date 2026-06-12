@@ -100,7 +100,7 @@ func (tm *TrayManager) WatchTunState() {
 				return
 			}
 			if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
-				tm.cm.UpdateTunAliveStatus(false)
+				tm.cm.SetTunAlive(false)
 				continue
 			}
 
@@ -114,7 +114,7 @@ func (tm *TrayManager) WatchTunState() {
 					}
 				}
 			}
-			tm.cm.UpdateTunAliveStatus(currentHasTun)
+			tm.cm.SetTunAlive(currentHasTun)
 		}
 	}
 }
@@ -370,7 +370,7 @@ func (tm *TrayManager) ReloadConfigFile() {
 }
 
 func (tm *TrayManager) SyncConfigToKernel() {
-	if !tm.cm.CompareAndSwapSyncing(0, 1) {
+	if !tm.cm.TryStartSyncing() {
 		return
 	}
 	defer func() {
@@ -723,7 +723,7 @@ func (tm *TrayManager) SetTunMode(enable bool) {
 				}
 			}
 			if found == enable {
-				tm.cm.UpdateTunAliveStatus(enable)
+				tm.cm.SetTunAlive(enable)
 				break
 			}
 			time.Sleep(200 * time.Millisecond)
