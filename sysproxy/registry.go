@@ -2,6 +2,7 @@ package sysproxy
 
 import (
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -55,7 +56,7 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 
 	if enable {
 		port := pm.cm.GetJsonConfig("port")
-		if port == "" {
+		if port == "" || len(port) < 4 {
 			port = "7890"
 		}
 		_ = k.SetDWordValue("ProxyEnable", 1)
@@ -76,6 +77,8 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		return
 	}
 	defer k.Close()
+
+	var retryCount int
 
 	for {
 		if pm.cm.IsReallyExiting() {
@@ -104,13 +107,46 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 				continue
 			}
 
+			expectedProxy := pm.cm.GetProxyState()
+
+			if !expectedProxy {
+				retryCount = 0
+				continue
+			}
+
 			val, _, err := k.GetIntegerValue("ProxyEnable")
-			if err == nil {
-				isRegEnabled := val == 1
-				if isRegEnabled != pm.cm.GetProxyState() {
-					pm.cm.SaveJsonConfig("proxy", strconv.FormatBool(isRegEnabled))
-					pm.cm.SetLastAppliedProxy(isRegEnabled)
+			realProxy := (err == nil && val == 1)
+
+			serverStr, _, errStr := k.GetStringValue("ProxyServer")
+			expectedPort := pm.cm.GetJsonConfig("port")
+			if expectedPort == "" || len(expectedPort) < 4 {
+				expectedPort = "7890"
+			}
+			expectedServer := "127.0.0.1:" + expectedPort
+
+			isPortHijacked := (errStr == nil && serverStr != expectedServer)
+
+			if realProxy && isPortHijacked {
+				retryCount = 0
+				pm.cm.SetLastAppliedProxy(false)
+				pm.cm.SaveJsonConfig("proxy", "false")
+				continue
+			}
+
+			if !realProxy {
+				retryCount++
+				if retryCount > 3 {
+					pm.cm.SetLastAppliedProxy(false)
+					pm.cm.SaveJsonConfig("proxy", "false")
+					retryCount = 0
+					continue
 				}
+
+				time.Sleep(200 * time.Millisecond)
+				pm.cm.SetLastAppliedProxy(false)
+				pm.SetProxyRegistry(true)
+			} else {
+				retryCount = 0
 			}
 		}
 	}
