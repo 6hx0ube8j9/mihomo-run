@@ -9,12 +9,9 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-)
 
-type configContextInterface interface {
-	CompareAndSwapFocusing(oldVal, newVal int32) bool
-	SetFocusing(val int32)
-}
+	"mihomo-run/config"
+)
 
 var (
 	u32       = windows.NewLazySystemDLL("user32.dll")
@@ -139,14 +136,14 @@ func CalculateWindowBounds(scrW, scrH int) (winW, winH, winX, winY int) {
 	return
 }
 
-func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
+func FocusWindowSilky(targetHwnd uintptr, cm *config.ConfigManager) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	if !cm.CompareAndSwapFocusing(0, 1) {
+	if !cm.TryStartFocusing() {
 		return
 	}
-	defer cm.SetFocusing(0)
+	defer cm.SetFocusing(false)
 
 	currT, _, _ := procGetCurrentThread.Call()
 	foreH, _, _ := procGetForeground.Call()
@@ -182,7 +179,7 @@ func FocusWindowSilky(targetHwnd uintptr, cm configContextInterface) {
 	})
 }
 
-func FindAndFocusChromeWindow(mainPid uint32, cm configContextInterface) bool {
+func FindAndFocusChromeWindow(mainPid uint32, cm *config.ConfigManager) bool {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
