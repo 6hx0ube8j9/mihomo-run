@@ -182,8 +182,8 @@ func (tm *TrayManager) evaluateTargetState() int32 {
 		return StateStop
 	}
 
-	wantTun := tm.cm.GetJsonConfig("tun") == "true"
-	wantProxy := tm.cm.GetJsonConfig("proxy") == "true"
+	wantTun := tm.cm.GetTunState()
+	wantProxy := tm.cm.GetProxyState()
 
 	if !wantTun {
 		tm.cm.SetTunRecoveryStart(time.Time{})
@@ -553,7 +553,7 @@ func (tm *TrayManager) SetupTrayUI() {
 	systray.AddSeparator()
 
 	tm.mProxy = systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
-	tm.mProxy.Click(func() {
+    tm.mProxy.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(200 * time.Millisecond)) {
 			return
 		}
@@ -563,7 +563,8 @@ func (tm *TrayManager) SetupTrayUI() {
 		} else {
 			tm.mProxy.Uncheck()
 		}
-		tm.cm.SetProxyState(next)
+		
+		tm.cm.SaveJsonConfig("proxy", strconv.FormatBool(next))
 		go tm.pm.SetProxyRegistry(next)
 	})
 
