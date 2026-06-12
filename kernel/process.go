@@ -11,19 +11,9 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-)
 
-type ConfigContextInterface interface {
-	BaseDir() string
-	IsReallyExiting() bool
-	IsSystemInitializing() bool
-	SetSystemInitializing(val bool)
-	IsSyncing() bool
-	SetHasFirstSynced(val bool)
-	SetKernelActive(active bool)
-	IsKernelActive() bool
-	SetTunStartTime(t time.Time)
-}
+	"mihomo-run/config"
+)
 
 type KernelHooks struct {
 	OnKernelStarted func()
@@ -32,7 +22,7 @@ type KernelHooks struct {
 
 type KernelManager struct {
 	hJob          windows.Handle
-	cm            ConfigContextInterface
+	cm            *config.ConfigManager
 	hooks         KernelHooks
 	currentPid    uint32
 	activeProcess *os.Process
@@ -57,7 +47,7 @@ func (km *KernelManager) isPidRunning(pid uint32) bool {
 	return exitCode == 259
 }
 
-func NewKernelManager(cm ConfigContextInterface, hooks KernelHooks) *KernelManager {
+func NewKernelManager(cm *config.ConfigManager, hooks KernelHooks) *KernelManager {
 	return &KernelManager{
 		cm:    cm,
 		hooks: hooks,
@@ -258,7 +248,7 @@ func (km *KernelManager) MonitorKernelDaemon() {
 
 		ticker.Stop()
 		km.cm.SetKernelActive(false)
-		
+
 		km.processMu.Lock()
 		km.activeProcess = nil
 		atomic.StoreUint32(&km.currentPid, 0)
