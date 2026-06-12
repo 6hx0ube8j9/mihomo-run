@@ -623,7 +623,7 @@ func (tm *TrayManager) SetupTrayUI() {
 	})
 
 	mMoreRoot := systray.AddMenuItem("更多", "")
-	mAuto := mMoreRoot.AddSubMenuItemCheckbox("开机自启动", "", tm.CheckAutoStartStatus())
+	mAuto := mMoreRoot.AddSubMenuItemCheckbox("开机启动", "", tm.CheckAutoStartStatus())
 	mAuto.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
 			return
