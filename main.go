@@ -77,10 +77,9 @@ func main() {
 			trayTemp := ui.NewTrayManager(configMgr, nil, proxyMgr)
 			trayTemp.SyncConfigToKernel()
 
-			if configMgr.GetJsonConfig("proxy") == "true" {
-				configMgr.SetLastAppliedProxy(false)
-				proxyMgr.SetProxyRegistry(true)
-			}
+			isProxyOn := configMgr.GetProxyState()
+			configMgr.SetLastAppliedProxy(!isProxyOn)
+			proxyMgr.SetProxyRegistry(isProxyOn)
 		},
 	}
 
