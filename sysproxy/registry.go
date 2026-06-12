@@ -1,7 +1,6 @@
 package sysproxy
 
 import (
-	"strings"
 	"sync/atomic"
 	"time"
 
