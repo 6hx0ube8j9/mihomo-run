@@ -466,7 +466,6 @@ func (tm *TrayManager) LaunchWebUI() {
 
 		args := []string{
 			"--app=" + finalURL,
-			"--app-id=mihomo-run",
 			"--remote-debugging-port=" + safeDebugPort,
 			"--user-data-dir=" + userDataDir,
 			"--window-size=" + strconv.Itoa(winW) + "," + strconv.Itoa(winH),
