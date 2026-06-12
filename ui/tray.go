@@ -439,15 +439,25 @@ func (tm *TrayManager) LaunchWebUI() {
 		}
 	}
 
-	var browserPath string
+    var browserPath string
 	potentialPaths := []string{
+		// 1. Edge
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Microsoft\Edge\Application\msedge.exe`),
 		filepath.Join(os.Getenv("ProgramFiles"), `Microsoft\Edge\Application\msedge.exe`),
+
+		// 2. Chrome
 		filepath.Join(os.Getenv("ProgramFiles"), `Google\Chrome\Application\chrome.exe`),
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Google\Chrome\Application\chrome.exe`),
 		filepath.Join(os.Getenv("LocalAppData"), `Google\Chrome\Application\chrome.exe`),
+
+		// 3. Brave
 		filepath.Join(os.Getenv("ProgramFiles"), `BraveSoftware\Brave-Browser\Application\brave.exe`),
 		filepath.Join(os.Getenv("LocalAppData"), `BraveSoftware\Brave-Browser\Application\brave.exe`),
+
+		// 4. Vivaldi
+		filepath.Join(os.Getenv("LocalAppData"), `Vivaldi\Application\vivaldi.exe`),
+		filepath.Join(os.Getenv("ProgramFiles"), `Vivaldi\Application\vivaldi.exe`),
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Vivaldi\Application\vivaldi.exe`),
 	}
 	for _, p := range potentialPaths {
 		if _, err := os.Stat(p); err == nil {
