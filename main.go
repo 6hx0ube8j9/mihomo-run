@@ -46,7 +46,6 @@ func main() {
 	defer windows.CloseHandle(hM)
 
 	eName, _ := windows.UTF16PtrFromString(SHOW_UI_EVENT)
-	// 【修复点】：使用 0 替代 false，满足 uint32 类型要求
 	hShowUIEvent, _ := windows.CreateEvent(nil, 0, 0, eName)
 	if hShowUIEvent != 0 {
 		defer windows.CloseHandle(hShowUIEvent)
