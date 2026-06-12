@@ -2,6 +2,7 @@ package sysproxy
 
 import (
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -23,8 +24,9 @@ func (b *Win32NotificationBridge) Refresh() {
 }
 
 type ProxyManager struct {
-	cm *config.ConfigManager
-	nb *Win32NotificationBridge
+	cm            *config.ConfigManager
+	nb            *Win32NotificationBridge
+	lastWriteNano atomic.Int64
 }
 
 func NewProxyManager(cm *config.ConfigManager, nb *Win32NotificationBridge) *ProxyManager {
@@ -65,6 +67,7 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 
 	pm.nb.Refresh()
 	pm.cm.SetLastAppliedProxy(enable)
+	pm.lastWriteNano.Store(time.Now().UnixNano())
 }
 
 func (pm *ProxyManager) WatchProxyRegistry() {
@@ -94,6 +97,9 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		}
 
 		if s == windows.WAIT_OBJECT_0 {
+			if time.Since(time.Unix(0, pm.lastWriteNano.Load())) < 1000*time.Millisecond {
+				continue
+			}
 			if pm.cm.IsProxyWriting() || pm.cm.IsSystemInitializing() {
 				continue
 			}
@@ -102,7 +108,6 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 			if err == nil {
 				isRegEnabled := val == 1
 				if isRegEnabled != pm.cm.GetProxyState() {
-					pm.cm.SetProxyState(isRegEnabled)
 					pm.cm.SaveJsonConfig("proxy", strconv.FormatBool(isRegEnabled))
 					pm.cm.SetLastAppliedProxy(isRegEnabled)
 				}
