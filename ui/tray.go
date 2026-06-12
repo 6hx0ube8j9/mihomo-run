@@ -223,8 +223,6 @@ func (tm *TrayManager) evaluateTargetState() int32 {
 func (tm *TrayManager) MonitorIconState() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	var pendingState int32 = -1
-	var pendingCount int
 
 	for {
 		select {
@@ -232,7 +230,7 @@ func (tm *TrayManager) MonitorIconState() {
 			if tm.cm.IsReallyExiting() {
 				return
 			}
-
+			
 			if tm.mProxy != nil {
 				proxyIsOn := tm.cm.GetProxyState()
 				if proxyIsOn && !tm.mProxy.Checked() {
@@ -243,24 +241,10 @@ func (tm *TrayManager) MonitorIconState() {
 			}
 
 			targetState := tm.evaluateTargetState()
-			lastState := tm.cm.GetLastState()
 
-			if lastState != targetState {
-				if pendingState == targetState {
-					pendingCount++
-					if pendingCount >= 2 {
-						tm.UpdateIconByState(int(targetState))
-						tm.cm.SetLastState(targetState)
-						pendingCount = 0
-						pendingState = -1
-					}
-				} else {
-					pendingState = targetState
-					pendingCount = 1
-				}
-			} else {
-				pendingState = -1
-				pendingCount = 0
+			if tm.cm.GetLastState() != targetState {
+				tm.UpdateIconByState(int(targetState))
+				tm.cm.SetLastState(targetState)
 			}
 		}
 	}
