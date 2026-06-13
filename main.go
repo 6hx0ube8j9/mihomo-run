@@ -10,15 +10,15 @@ import (
 	"github.com/energye/systray"
 	"golang.org/x/sys/windows"
 
-	"mihomo-run/config"
-	"mihomo-run/kernel"
-	"mihomo-run/sysproxy"
-	"mihomo-run/ui"
+	"mihomo-tray/config"
+	"mihomo-tray/kernel"
+	"mihomo-tray/sysproxy"
+	"mihomo-tray/ui"
 )
 
 const (
-	APP_MUTEX     = "Mihomo_Unique_Mutex"
-	SHOW_UI_EVENT = "Mihomo_Unique_Mutex_ShowUI"
+	APP_MUTEX     = "Mihomo_Tray_Mutex"
+	SHOW_UI_EVENT = "Mihomo_Tray_Mutex_ShowUI"
 )
 
 func main() {
@@ -70,8 +70,7 @@ func main() {
 
 	kernelHooks := kernel.KernelHooks{
 		OnKernelStarted: func() {
-			trayTemp := ui.NewTrayManager(configMgr, nil, nil)
-			trayTemp.SniffAndSolidifyConfig()
+			configMgr.SniffAndSolidifyConfig()
 		},
 		OnKernelReady: func() {
 			trayTemp := ui.NewTrayManager(configMgr, nil, proxyMgr)
