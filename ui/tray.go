@@ -128,8 +128,10 @@ func (tm *TrayManager) WatchTunState() {
 
 	for {
 		var bytesReturned uint32
+		const SIO_ADDRESS_LIST_CHANGE = 0x28000017
+
 		err := windows.WSAIoctl(
-			fd, windows.SIO_ADDRESS_LIST_CHANGE,
+			fd, SIO_ADDRESS_LIST_CHANGE,
 			nil, 0, nil, 0, &bytesReturned, nil, 0,
 		)
 
