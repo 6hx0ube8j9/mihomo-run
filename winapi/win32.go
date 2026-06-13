@@ -14,11 +14,8 @@ import (
 )
 
 var (
-	u32       = windows.NewLazySystemDLL("user32.dll")
-	k32       = windows.NewLazySystemDLL("kernel32.dll")
-	wininet   = windows.NewLazySystemDLL("wininet.dll")
-	imghelp   = windows.NewLazySystemDLL("imagehlp.dll")
-	setOption = wininet.NewProc("InternetSetOptionW")
+	u32 = windows.NewLazySystemDLL("user32.dll")
+	k32 = windows.NewLazySystemDLL("kernel32.dll")
 )
 
 var (
@@ -46,8 +43,6 @@ const (
 	SWP_NOMOVE     = 0x0002
 	SWP_SHOWWINDOW = 0x0040
 	SWP_SILKY      = SWP_NOSIZE | SWP_NOMOVE | SWP_SHOWWINDOW
-	SM_CXSCREEN    = 0
-	SM_CYSCREEN    = 1
 )
 
 var cachedWebUIHwnd atomic.Uintptr
@@ -77,11 +72,6 @@ func IsWindowVisible(hwnd uintptr) bool {
 func GetSystemMetrics(index int) int {
 	res, _, _ := procGetSystemMetrics.Call(uintptr(index))
 	return int(res)
-}
-
-func RefreshInternetOptions() {
-	_, _, _ = setOption.Call(0, 37, 0, 0)
-	_, _, _ = setOption.Call(0, 39, 0, 0)
 }
 
 func CalculateWindowBounds(scrW, scrH int) (winW, winH, winX, winY int) {
