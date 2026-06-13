@@ -141,7 +141,7 @@ func (tm *TrayManager) SetupTrayUI() {
 
 	systray.AddSeparator()
 
-	mDir := systray.AddMenuItem("打开目录", "")
+	mDir := systray.AddMenuItem("打开程序目录", "")
 	mDir.Click(func() {
 		windows.ShellExecute(0, nil, windows.StringToUTF16Ptr(tm.cm.BaseDir()), nil, nil, windows.SW_SHOWNORMAL)
 	})
