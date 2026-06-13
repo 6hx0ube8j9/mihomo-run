@@ -3,6 +3,7 @@ package ui
 import (
 	"embed"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
