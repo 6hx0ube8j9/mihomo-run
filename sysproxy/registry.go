@@ -6,7 +6,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
-	"mihomo-run/config"
+	"mihomo-tray/config"
 )
 
 var (
