@@ -59,7 +59,6 @@ type TrayManager struct {
 	httpClient      *http.Client
 	mTun            *systray.MenuItem
 	mProxy          *systray.MenuItem
-	mModes          map[string]*systray.MenuItem // 用于毫秒级同步模式UI
 	chromeDebugPort string
 	debugPortMu     sync.Mutex
 }
@@ -69,7 +68,6 @@ func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysp
 		cm: cm,
 		km: km,
 		pm: pm,
-		mModes: make(map[string]*systray.MenuItem),
 		httpClient: &http.Client{
 			Timeout:   500 * time.Millisecond,
 			Transport: &http.Transport{DisableKeepAlives: true},
@@ -92,9 +90,65 @@ func getFreePort() string {
 }
 
 func (tm *TrayManager) WatchTunState() {
+	fd, err := windows.Socket(windows.AF_INET, windows.SOCK_DGRAM, windows.IPPROTO_UDP)
+	if err != nil {
+		tm.fallbackWatchTunState()
+		return
+	}
+
+	go func() {
+		for {
+			if tm.cm.IsReallyExiting() {
+				_ = windows.Close(fd)
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+
+	checkTun := func() {
+		if !tm.cm.IsKernelActive() || !tm.cm.GetTunState() {
+			tm.cm.SetTunAlive(false)
+			return
+		}
+		currentHasTun := false
+		ifaces, err := net.Interfaces()
+		if err == nil {
+			for _, i := range ifaces {
+				if tm.IsTunInterfaceMatch(i.Name) {
+					currentHasTun = true
+					break
+				}
+			}
+		}
+		tm.cm.SetTunAlive(currentHasTun)
+	}
+
+	checkTun()
+
+	for {
+		var bytesReturned uint32
+		err := windows.WSAIoctl(
+			fd, windows.SIO_ADDRESS_LIST_CHANGE,
+			nil, 0, nil, 0, &bytesReturned, nil, 0,
+		)
+
+		if err != nil {
+			if tm.cm.IsReallyExiting() {
+				return
+			}
+			tm.fallbackWatchTunState()
+			return
+		}
+
+		time.Sleep(200 * time.Millisecond)
+		checkTun()
+	}
+}
+
+func (tm *TrayManager) fallbackWatchTunState() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ticker.C:
@@ -105,7 +159,6 @@ func (tm *TrayManager) WatchTunState() {
 				tm.cm.SetTunAlive(false)
 				continue
 			}
-
 			currentHasTun := false
 			ifaces, err := net.Interfaces()
 			if err == nil {
@@ -117,16 +170,6 @@ func (tm *TrayManager) WatchTunState() {
 				}
 			}
 			tm.cm.SetTunAlive(currentHasTun)
-		}
-	}
-}
-
-func (tm *TrayManager) updateModeMenu(mode string) {
-	for k, m := range tm.mModes {
-		if k == mode {
-			m.Check()
-		} else {
-			m.Uncheck()
 		}
 	}
 }
@@ -184,7 +227,6 @@ func (tm *TrayManager) WatchCoreAPI() {
 			if currentConf.Mode != "" && currentConf.Mode != targetModeInJson && currentConf.Mode != realModeInConfig {
 				tm.cm.SetCurrentModeState(currentConf.Mode)
 				tm.cm.SaveJsonConfig("mode", currentConf.Mode)
-				tm.updateModeMenu(currentConf.Mode)
 			}
 		}
 	}
@@ -243,7 +285,7 @@ func (tm *TrayManager) MonitorIconState() {
 			if tm.cm.IsReallyExiting() {
 				return
 			}
-
+			
 			if tm.mProxy != nil {
 				proxyIsOn := tm.cm.GetProxyState()
 				if proxyIsOn && !tm.mProxy.Checked() {
@@ -356,7 +398,6 @@ func (tm *TrayManager) ReloadConfigFile() {
 
 		tm.cm.SetTunState(isTunOn)
 		tm.cm.SetCurrentModeState(modeStr)
-		tm.updateModeMenu(modeStr)
 
 		if isProxyEnabled {
 			tm.cm.SetLastAppliedProxy(false)
@@ -406,7 +447,6 @@ func (tm *TrayManager) LaunchWebUI() {
 	if port == "" {
 		host, port = "127.0.0.1", "9090"
 	}
-	uiHostPort := host + ":" + port
 	finalURL := fmt.Sprintf("%s/ui/?hostname=%s&port=%s&secret=%s#/proxies", baseUI, host, port, secret)
 
 	if hwnd := winapi.GetCachedWebUIHwnd(); hwnd != 0 {
@@ -454,15 +494,22 @@ func (tm *TrayManager) LaunchWebUI() {
 		}
 	}
 
-	var browserPath string
+    var browserPath string
 	potentialPaths := []string{
+		// 1. Edge
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Microsoft\Edge\Application\msedge.exe`),
 		filepath.Join(os.Getenv("ProgramFiles"), `Microsoft\Edge\Application\msedge.exe`),
+
+		// 2. Chrome
 		filepath.Join(os.Getenv("ProgramFiles"), `Google\Chrome\Application\chrome.exe`),
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Google\Chrome\Application\chrome.exe`),
 		filepath.Join(os.Getenv("LocalAppData"), `Google\Chrome\Application\chrome.exe`),
+
+		// 3. Brave
 		filepath.Join(os.Getenv("ProgramFiles"), `BraveSoftware\Brave-Browser\Application\brave.exe`),
 		filepath.Join(os.Getenv("LocalAppData"), `BraveSoftware\Brave-Browser\Application\brave.exe`),
+
+		// 4. Vivaldi
 		filepath.Join(os.Getenv("LocalAppData"), `Vivaldi\Application\vivaldi.exe`),
 		filepath.Join(os.Getenv("ProgramFiles"), `Vivaldi\Application\vivaldi.exe`),
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Vivaldi\Application\vivaldi.exe`),
@@ -501,27 +548,6 @@ func (tm *TrayManager) LaunchWebUI() {
 						break
 					}
 					time.Sleep(BrowserFocusSleepTime)
-				}
-			}()
-
-			// 启动坚固无依赖的 CDP 底层拦截器
-			go func() {
-				time.Sleep(1 * time.Second)
-				resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json", safeDebugPort))
-				if err != nil {
-					return
-				}
-				defer resp.Body.Close()
-				var targets []map[string]interface{}
-				if json.NewDecoder(resp.Body).Decode(&targets) == nil {
-					for _, t := range targets {
-						if t["type"] == "page" {
-							if ws, ok := t["webSocketDebuggerUrl"].(string); ok {
-								tm.startCDPMonitor(ws, uiHostPort)
-								break
-							}
-						}
-					}
 				}
 			}()
 		}
@@ -591,7 +617,7 @@ func (tm *TrayManager) SetupTrayUI() {
 	systray.AddSeparator()
 
 	tm.mProxy = systray.AddMenuItemCheckbox("系统代理", "", initProxyChecked)
-	tm.mProxy.Click(func() {
+    tm.mProxy.Click(func() {
 		if !tm.cm.CheckAndThrottleClick(int64(200 * time.Millisecond)) {
 			return
 		}
@@ -601,7 +627,7 @@ func (tm *TrayManager) SetupTrayUI() {
 		} else {
 			tm.mProxy.Uncheck()
 		}
-
+		
 		tm.cm.SaveJsonConfig("proxy", strconv.FormatBool(next))
 		go tm.pm.SetProxyRegistry(next)
 	})
@@ -623,13 +649,20 @@ func (tm *TrayManager) SetupTrayUI() {
 	systray.AddSeparator()
 
 	mModeRoot := systray.AddMenuItem("模式切换", "")
+	modeMenus := make(map[string]*systray.MenuItem)
 	setupMode := func(key, label string) {
-		tm.mModes[key] = mModeRoot.AddSubMenuItemCheckbox(label, "", initModeChecked == key)
-		tm.mModes[key].Click(func() {
+		modeMenus[key] = mModeRoot.AddSubMenuItemCheckbox(label, "", initModeChecked == key)
+		modeMenus[key].Click(func() {
 			if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
 				return
 			}
-			tm.updateModeMenu(key)
+			for k, menu := range modeMenus {
+				if k == key {
+					menu.Check()
+				} else {
+					menu.Uncheck()
+				}
+			}
 			go tm.SetMihomoMode(key)
 		})
 	}
@@ -890,191 +923,4 @@ func (tm *TrayManager) IsTunInterfaceMatch(ifaceName string) bool {
 		}
 	}
 	return false
-}
-
-// ---------------------------------------------------------
-// 坚固无依赖的 CDP 底层拦截器 (安全、零依赖、无端口冲突)
-// ---------------------------------------------------------
-
-func (tm *TrayManager) startCDPMonitor(wsURL, uiHostPort string) {
-	address := strings.TrimPrefix(wsURL, "ws://")
-	parts := strings.SplitN(address, "/", 2)
-	host, path := parts[0], "/"+parts[1]
-
-	conn, err := net.Dial("tcp", host)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	req := fmt.Sprintf(
-		"GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
-		path, host,
-	)
-	_, _ = conn.Write([]byte(req))
-
-	reader := bufio.NewReader(conn)
-	for {
-		line, _, err := reader.ReadLine()
-		if err != nil || len(line) == 0 {
-			break
-		}
-	}
-
-	msgID := 1
-	sendCmd := func(method string, params interface{}) {
-		reqMap := map[string]interface{}{"id": msgID, "method": method}
-		if params != nil {
-			reqMap["params"] = params
-		}
-		payload, _ := json.Marshal(reqMap)
-		msgID++
-
-		length := len(payload)
-		var frame []byte
-		if length <= 125 {
-			frame = append(frame, 0x81, byte(length))
-		} else if length <= 65535 {
-			frame = append(frame, 0x81, 126, byte(length>>8), byte(length&0xFF))
-		} else {
-			frame = append(frame, 0x81, 127, 0, 0, 0, 0, byte(length>>24), byte(length>>16), byte(length>>8), byte(length&0xFF))
-		}
-		frame = append(frame, payload...)
-		_, _ = conn.Write(frame)
-	}
-
-	// 1. 拦截下载  2. 监听外部链接  3. 监听 WebUI API 动作
-	sendCmd("Browser.setDownloadBehavior", map[string]interface{}{"behavior": "deny"})
-	sendCmd("Target.setDiscoverTargets", map[string]interface{}{"discover": true})
-	sendCmd("Network.enable", nil)
-
-	for {
-		payload, opcode, err := readWSFrameSafe(reader)
-		if err != nil {
-			break
-		}
-		if opcode == 9 {
-			_, _ = conn.Write([]byte{0x8a, 0x00}) // 自动响应 Ping 保持连接存活
-			continue
-		}
-		if opcode != 1 {
-			continue // 忽略非文本帧
-		}
-
-		var ev struct {
-			Method string          `json:"method"`
-			Params json.RawMessage `json:"params"`
-		}
-		_ = json.Unmarshal(payload, &ev)
-
-		switch ev.Method {
-		case "Browser.downloadWillBegin":
-			var p struct{ URL string `json:"url"` }
-			_ = json.Unmarshal(ev.Params, &p)
-			if p.URL != "" {
-				go exec.Command("cmd", "/c", "start", "", p.URL).Start()
-			}
-
-		case "Target.targetCreated", "Target.targetInfoChanged":
-			var p struct {
-				TargetInfo struct {
-					TargetId string `json:"targetId"`
-					Type     string `json:"type"`
-					URL      string `json:"url"`
-				} `json:"targetInfo"`
-			}
-			_ = json.Unmarshal(ev.Params, &p)
-			ti := p.TargetInfo
-			if ti.Type == "page" && ti.URL != "" && ti.URL != "about:blank" && !strings.HasPrefix(ti.URL, "devtools://") {
-				if !strings.Contains(ti.URL, uiHostPort) {
-					sendCmd("Target.closeTarget", map[string]interface{}{"targetId": ti.TargetId})
-					go exec.Command("cmd", "/c", "start", "", ti.URL).Start()
-				}
-			}
-
-		case "Network.requestWillBeSent":
-			var p struct {
-				Request struct {
-					URL      string `json:"url"`
-					Method   string `json:"method"`
-					PostData string `json:"postData"`
-				} `json:"request"`
-			}
-			_ = json.Unmarshal(ev.Params, &p)
-			req := p.Request
-			if req.Method == "PATCH" && strings.Contains(req.URL, "/configs") && req.PostData != "" {
-				var data map[string]interface{}
-				if err := json.Unmarshal([]byte(req.PostData), &data); err == nil {
-					if mode, ok := data["mode"].(string); ok {
-						tm.cm.SetCurrentModeState(mode)
-						tm.cm.SaveJsonConfig("mode", mode)
-						tm.updateModeMenu(mode) // 毫秒级同步UI菜单
-					}
-					if tunMap, ok := data["tun"].(map[string]interface{}); ok {
-						if enable, ok := tunMap["enable"].(bool); ok {
-							tm.cm.SetTunState(enable)
-							tm.cm.SaveJsonConfig("tun", strconv.FormatBool(enable))
-							if tm.mTun != nil {
-								if enable {
-									tm.mTun.Check()
-								} else {
-									tm.mTun.Uncheck()
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// 严谨的安全 WebSocket 数据帧读取器 (解决长文本分片与越界崩溃)
-func readWSFrameSafe(r *bufio.Reader) ([]byte, int, error) {
-	b0, err := r.ReadByte()
-	if err != nil {
-		return nil, 0, err
-	}
-	opcode := int(b0 & 0x0F)
-
-	b1, err := r.ReadByte()
-	if err != nil {
-		return nil, 0, err
-	}
-	masked := b1&0x80 != 0
-	payloadLen := int(b1 & 0x7F)
-
-	if payloadLen == 126 {
-		buf := make([]byte, 2)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, 0, err
-		}
-		payloadLen = int(buf[0])<<8 | int(buf[1])
-	} else if payloadLen == 127 {
-		buf := make([]byte, 8)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, 0, err
-		}
-		payloadLen = int(buf[4])<<24 | int(buf[5])<<16 | int(buf[6])<<8 | int(buf[7])
-	}
-
-	var maskKey []byte
-	if masked {
-		maskKey = make([]byte, 4)
-		if _, err := io.ReadFull(r, maskKey); err != nil {
-			return nil, 0, err
-		}
-	}
-
-	payload := make([]byte, payloadLen)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return nil, 0, err
-	}
-
-	if masked {
-		for i := 0; i < payloadLen; i++ {
-			payload[i] ^= maskKey[i%4]
-		}
-	}
-	return payload, opcode, nil
 }
