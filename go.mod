@@ -1,4 +1,4 @@
-module mihomo-run
+module mihomo-tray
 
 go 1.23
 
