@@ -59,6 +59,7 @@ type TrayManager struct {
 	httpClient      *http.Client
 	mTun            *systray.MenuItem
 	mProxy          *systray.MenuItem
+	mModes          map[string]*systray.MenuItem
 	chromeDebugPort string
 	debugPortMu     sync.Mutex
 }
@@ -68,6 +69,7 @@ func NewTrayManager(cm *config.ConfigManager, km *kernel.KernelManager, pm *sysp
 		cm: cm,
 		km: km,
 		pm: pm,
+		mModes: make(map[string]*systray.MenuItem),
 		httpClient: &http.Client{
 			Timeout:   500 * time.Millisecond,
 			Transport: &http.Transport{DisableKeepAlives: true},
@@ -229,6 +231,14 @@ func (tm *TrayManager) WatchCoreAPI() {
 			if currentConf.Mode != "" && currentConf.Mode != targetModeInJson && currentConf.Mode != realModeInConfig {
 				tm.cm.SetCurrentModeState(currentConf.Mode)
 				tm.cm.SaveJsonConfig("mode", currentConf.Mode)
+				
+				for k, m := range tm.mModes {
+					if k == currentConf.Mode {
+						m.Check()
+					} else {
+						m.Uncheck()
+					}
+				}
 			}
 		}
 	}
@@ -386,6 +396,7 @@ func (tm *TrayManager) ReloadConfigFile() {
 	tm.cm.SetSyncing(true)
 	tm.cm.SetSystemInitializing(true)
 	isProxyEnabled := tm.cm.GetProxyState()
+	
 	_, _ = tm.DoAPIRequest("PUT", "/configs?force=true", nil)
 	tm.SniffAndSolidifyConfig()
 
@@ -406,7 +417,17 @@ func (tm *TrayManager) ReloadConfigFile() {
 			tm.pm.SetProxyRegistry(true)
 		}
 
-		tm.SyncConfigToKernel()
+		payload := map[string]interface{}{
+			"tun": map[string]bool{"enable": isTunOn},
+			"mode": modeStr,
+		}
+
+		for i := 0; i < 4; i++ {
+			if _, err := tm.DoAPIRequest("PATCH", "/configs", payload); err == nil {
+				break
+			}
+			time.Sleep(time.Duration(i+1) * 300 * time.Millisecond)
+		}
 	}()
 }
 
@@ -651,14 +672,13 @@ func (tm *TrayManager) SetupTrayUI() {
 	systray.AddSeparator()
 
 	mModeRoot := systray.AddMenuItem("模式切换", "")
-	modeMenus := make(map[string]*systray.MenuItem)
 	setupMode := func(key, label string) {
-		modeMenus[key] = mModeRoot.AddSubMenuItemCheckbox(label, "", initModeChecked == key)
-		modeMenus[key].Click(func() {
+		tm.mModes[key] = mModeRoot.AddSubMenuItemCheckbox(label, "", initModeChecked == key)
+		tm.mModes[key].Click(func() {
 			if !tm.cm.CheckAndThrottleClick(int64(500 * time.Millisecond)) {
 				return
 			}
-			for k, menu := range modeMenus {
+			for k, menu := range tm.mModes {
 				if k == key {
 					menu.Check()
 				} else {
