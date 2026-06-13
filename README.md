@@ -1,1 +1,1 @@
-# mihomo-run
+# mihomo-tray
