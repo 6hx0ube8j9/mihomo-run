@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"mihomo-run/config"
+	"mihomo-tray/config"
 )
 
 type KernelHooks struct {
