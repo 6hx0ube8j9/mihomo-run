@@ -1,7 +1,6 @@
 package sysproxy
 
 import (
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -23,9 +22,8 @@ func (b *Win32NotificationBridge) Refresh() {
 }
 
 type ProxyManager struct {
-	cm            *config.ConfigManager
-	nb            *Win32NotificationBridge
-	lastWriteNano atomic.Int64
+	cm *config.ConfigManager
+	nb *Win32NotificationBridge
 }
 
 func NewProxyManager(cm *config.ConfigManager, nb *Win32NotificationBridge) *ProxyManager {
@@ -66,7 +64,6 @@ func (pm *ProxyManager) SetProxyRegistry(enable bool) {
 
 	pm.nb.Refresh()
 	pm.cm.SetLastAppliedProxy(enable)
-	pm.lastWriteNano.Store(time.Now().UnixNano())
 }
 
 func (pm *ProxyManager) WatchProxyRegistry() {
@@ -98,11 +95,7 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 		}
 
 		if s == windows.WAIT_OBJECT_0 {
-
-			if time.Since(time.Unix(0, pm.lastWriteNano.Load())) < 1000*time.Millisecond {
-				continue
-			}
-			if pm.cm.IsProxyWriting() || pm.cm.IsSystemInitializing() {
+			if pm.cm.IsSystemInitializing() {
 				continue
 			}
 
@@ -123,16 +116,16 @@ func (pm *ProxyManager) WatchProxyRegistry() {
 			}
 			expectedServer := "127.0.0.1:" + expectedPort
 
-			isPortHijacked := (errStr == nil && serverStr != expectedServer)
+			isPortHijacked := (errStr == nil && serverStr != expectedServer && serverStr != "")
 
 			if realProxy && isPortHijacked {
 				retryCount = 0
 				pm.cm.SetLastAppliedProxy(false)
-				pm.cm.SaveJsonConfig("proxy", "false") 
+				pm.cm.SaveJsonConfig("proxy", "false")
 				continue
 			}
 
-			if !realProxy {
+			if !realProxy || serverStr != expectedServer {
 				retryCount++
 				if retryCount > 3 {
 					pm.cm.SetLastAppliedProxy(false)
