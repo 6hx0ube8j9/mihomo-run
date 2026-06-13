@@ -1,15 +1,17 @@
 package config
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-const CONFIG_FILE = "mihomo-run.json"
+const CONFIG_FILE = "mihomo-tray.json"
 
 type AppState struct {
 	CurrentMode          string
@@ -106,7 +108,7 @@ func (cm *ConfigManager) EnsureDefaultConfig() {
 	for k, v := range fileData {
 		cm.configData[k] = v
 	}
-	
+
 	cm.state.ProxyEnabled = (cm.configData["proxy"] == "true")
 	cm.state.TunEnabled = (cm.configData["tun"] == "true")
 	if cm.state.TunEnabled {
@@ -177,6 +179,80 @@ func (cm *ConfigManager) SaveJsonConfig(key, value string) {
 
 	if err := os.Rename(tmpPath, cfgPath); err != nil {
 		_ = os.Remove(tmpPath)
+	}
+}
+
+func (cm *ConfigManager) SniffAndSolidifyConfig() {
+	configPath := filepath.Join(cm.BaseDir(), "config.yaml")
+	file, err := os.Open(configPath)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	inTunSection := false
+	foundMixed := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = line[:idx]
+		}
+
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "mixed-port:") {
+			if parts := strings.SplitN(trimmed, ":", 2); len(parts) == 2 {
+				if port := strings.Trim(parts[1], " \"'"); port != "" {
+					cm.SaveJsonConfig("port", port)
+					foundMixed = true
+				}
+			}
+			continue
+		}
+		if !foundMixed && strings.HasPrefix(trimmed, "port:") {
+			if parts := strings.SplitN(trimmed, ":", 2); len(parts) == 2 {
+				if port := strings.Trim(parts[1], " \"'"); port != "" {
+					cm.SaveJsonConfig("port", port)
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "tun:") {
+			inTunSection = true
+			continue
+		}
+		if inTunSection && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inTunSection = false
+		}
+		if inTunSection && strings.Contains(trimmed, "device:") {
+			if parts := strings.SplitN(trimmed, ":", 2); len(parts) == 2 {
+				if devName := strings.Trim(parts[1], " \"'"); devName != "" {
+					cm.SaveJsonConfig("tun_device", devName)
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "external-controller:") {
+			addr := strings.Trim(strings.TrimPrefix(trimmed, "external-controller:"), " \"'")
+			if strings.HasPrefix(addr, ":") {
+				addr = "127.0.0.1" + addr
+			}
+			if addr != "" {
+				if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+					addr = "http://" + addr
+				}
+				cm.SaveJsonConfig("external-controller", addr)
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "secret:") {
+			val := strings.Trim(strings.TrimPrefix(trimmed, "secret:"), " \"'")
+			cm.SaveJsonConfig("secret", val)
+			continue
+		}
 	}
 }
 
