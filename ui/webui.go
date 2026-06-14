@@ -38,6 +38,7 @@ func (tm *TrayManager) LaunchWebUI() {
 	apiAddr := tm.cm.GetJsonConfig("external-controller")
 	secret := tm.cm.GetJsonConfig("secret")
 	proxyAddr := "127.0.0.1:" + tm.cm.GetJsonConfig("port")
+	
 	baseUI := strings.TrimRight(apiAddr, "/")
 	if !strings.HasPrefix(baseUI, "http") {
 		baseUI = "http://" + baseUI
@@ -69,52 +70,71 @@ func (tm *TrayManager) LaunchWebUI() {
 	}
 
 	if resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json", safeDebugPort)); err == nil {
-		defer resp.Body.Close()
 		var targets []map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&targets); err == nil {
+			_ = resp.Body.Close()
 			for _, t := range targets {
 				pURL, _ := t["url"].(string)
-				if strings.Contains(pURL, "/ui/") || strings.Contains(pURL, "setup") {
+				if strings.Contains(pURL, "/ui/") || strings.Contains(pURL, "setup") || strings.Contains(pURL, "#/proxies") {
 					id, _ := t["id"].(string)
 					if actResp, actErr := client.Get(fmt.Sprintf("http://127.0.0.1:%s/json/activate/%s", safeDebugPort, id)); actErr == nil {
 						_ = actResp.Body.Close()
 					}
-					go func() {
-						for i := 0; i < MaxBrowserFocusRetry; i++ {
-							if winapi.FindAndFocusChromeWindow(0, tm.cm) {
-								break
-							}
-							time.Sleep(BrowserFocusSleepTime)
+					
+					windowFound := false
+					for i := 0; i < 5; i++ {
+						if winapi.FindAndFocusChromeWindow(0, tm.cm) {
+							windowFound = true
+							break
 						}
-					}()
-					return
+						time.Sleep(50 * time.Millisecond)
+					}
+					
+					if windowFound {
+						return
+					} else {
+						break
+					}
 				}
 			}
+		} else {
+			_ = resp.Body.Close()
 		}
 	}
 
-	var browserPath string
-	potentialPaths := []string{
-		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Microsoft\Edge\Application\msedge.exe`),
-		filepath.Join(os.Getenv("ProgramFiles"), `Microsoft\Edge\Application\msedge.exe`),
-		filepath.Join(os.Getenv("ProgramFiles"), `Google\Chrome\Application\chrome.exe`),
-		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Google\Chrome\Application\chrome.exe`),
-		filepath.Join(os.Getenv("LocalAppData"), `Google\Chrome\Application\chrome.exe`),
-		filepath.Join(os.Getenv("ProgramFiles"), `BraveSoftware\Brave-Browser\Application\brave.exe`),
-		filepath.Join(os.Getenv("LocalAppData"), `BraveSoftware\Brave-Browser\Application\brave.exe`),
-		filepath.Join(os.Getenv("LocalAppData"), `Vivaldi\Application\vivaldi.exe`),
-		filepath.Join(os.Getenv("ProgramFiles"), `Vivaldi\Application\vivaldi.exe`),
-		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Vivaldi\Application\vivaldi.exe`),
+	type browserInfo struct {
+		path string
+		tag  string
 	}
-	for _, p := range potentialPaths {
-		if _, err := os.Stat(p); err == nil {
-			browserPath = p
+	potentialBrowsers := []browserInfo{
+		// Edge
+		{filepath.Join(os.Getenv("ProgramFiles(x86)"), `Microsoft\Edge\Application\msedge.exe`), "edge"},
+		{filepath.Join(os.Getenv("ProgramFiles"), `Microsoft\Edge\Application\msedge.exe`), "edge"},
+		// Chrome
+		{filepath.Join(os.Getenv("ProgramFiles"), `Google\Chrome\Application\chrome.exe`), "chrome"},
+		{filepath.Join(os.Getenv("ProgramFiles(x86)"), `Google\Chrome\Application\chrome.exe`), "chrome"},
+		{filepath.Join(os.Getenv("LocalAppData"), `Google\Chrome\Application\chrome.exe`), "chrome"},
+		// Brave
+		{filepath.Join(os.Getenv("ProgramFiles"), `BraveSoftware\Brave-Browser\Application\brave.exe`), "brave"},
+		{filepath.Join(os.Getenv("LocalAppData"), `BraveSoftware\Brave-Browser\Application\brave.exe`), "brave"},
+		// Vivaldi
+		{filepath.Join(os.Getenv("LocalAppData"), `Vivaldi\Application\vivaldi.exe`), "vivaldi"},
+		{filepath.Join(os.Getenv("ProgramFiles"), `Vivaldi\Application\vivaldi.exe`), "vivaldi"},
+		{filepath.Join(os.Getenv("ProgramFiles(x86)"), `Vivaldi\Application\vivaldi.exe`), "vivaldi"},
+	}
+
+	var browserPath string
+	var browserTag string
+	for _, b := range potentialBrowsers {
+		if _, err := os.Stat(b.path); err == nil {
+			browserPath = b.path
+			browserTag  = b.tag
 			break
 		}
 	}
 
 	if browserPath != "" {
-		userDataDir := filepath.Join(tm.cm.BaseDir(), "webcache")
+		userDataDir := filepath.Join(tm.cm.BaseDir(), "webcache", browserTag)
 		_ = os.MkdirAll(userDataDir, 0755)
 
 		scrW := winapi.GetSystemMetrics(0)
@@ -131,6 +151,7 @@ func (tm *TrayManager) LaunchWebUI() {
 			"--no-first-run",
 			"--no-default-browser-check",
 		}
+		
 		cmd := exec.Command(browserPath, args...)
 		if err := cmd.Start(); err == nil {
 			mainPid := uint32(cmd.Process.Pid)
@@ -161,6 +182,7 @@ func (tm *TrayManager) CleanupWebUI() {
 		Timeout:   200 * time.Millisecond,
 		Transport: &http.Transport{DisableKeepAlives: true},
 	}
+	
 	apiURL := fmt.Sprintf("http://127.0.0.1:%s/json", safeDebugPort)
 	if resp, err := client.Get(apiURL); err == nil {
 		var targets []map[string]interface{}
